@@ -1,10 +1,14 @@
 """Simple page crawler to extract forms and links from target pages."""
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 import time
 from urllib.parse import urljoin, urlparse, parse_qs, urlencode
 
 import requests
 from bs4 import BeautifulSoup
+
+from .url_safety import validate_public_http_url, validate_redirect_target
 
 
 HEADERS = {
@@ -12,6 +16,99 @@ HEADERS = {
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 TIMEOUT = 10
+MAX_RESPONSE_BYTES = 1024 * 1024
+_REQUEST_BUDGET = ContextVar("scan_request_budget", default=None)
+
+
+@contextmanager
+def request_budget(limit):
+    """Apply a per-scan outgoing request budget."""
+    token = _REQUEST_BUDGET.set({
+        "remaining": int(limit),
+        "exhausted": False,
+    })
+    try:
+        yield
+    finally:
+        _REQUEST_BUDGET.reset(token)
+
+
+def budget_exhausted():
+    """Return True when the active budget has been exceeded."""
+    state = _REQUEST_BUDGET.get()
+    return bool(state and state["exhausted"])
+
+
+def _consume_request_budget():
+    state = _REQUEST_BUDGET.get()
+    if state is None:
+        return True
+    if state["remaining"] <= 0:
+        state["exhausted"] = True
+        return False
+    state["remaining"] -= 1
+    return True
+
+
+def _redirect_guard(response, *_args, **_kwargs):
+    location = response.headers.get("Location")
+    if response.is_redirect and location:
+        validate_redirect_target(response.url, location)
+    return response
+
+
+def _merge_response_hooks(existing_hooks):
+    hooks = {}
+    if existing_hooks:
+        hooks.update(existing_hooks)
+
+    response_hooks = hooks.get("response", [])
+    if callable(response_hooks):
+        response_hooks = [response_hooks]
+    else:
+        response_hooks = list(response_hooks)
+
+    response_hooks.append(_redirect_guard)
+    hooks["response"] = response_hooks
+    return hooks
+
+
+def _safe_close(response):
+    try:
+        response.close()
+    except AttributeError:
+        pass
+
+
+def _read_bounded_response(response):
+    if getattr(response, "raw", None) is None and hasattr(response, "_content"):
+        content = getattr(response, "_content", b"") or b""
+        if len(content) > MAX_RESPONSE_BYTES:
+            _safe_close(response)
+            return None
+        response._content = content
+        _safe_close(response)
+        return response
+
+    chunks = []
+    total = 0
+
+    try:
+        for chunk in response.iter_content(chunk_size=8192):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > MAX_RESPONSE_BYTES:
+                _safe_close(response)
+                return None
+            chunks.append(chunk)
+    except requests.RequestException:
+        _safe_close(response)
+        return None
+
+    response._content = b"".join(chunks)
+    _safe_close(response)
+    return response
 
 
 def fetch(url, method="GET", headers=None, **kwargs):
@@ -19,22 +116,37 @@ def fetch(url, method="GET", headers=None, **kwargs):
     merged_headers = dict(HEADERS)
     if headers:
         merged_headers.update(headers)
+    allow_redirects = kwargs.pop("allow_redirects", True)
+    hooks = kwargs.pop("hooks", None)
+
     try:
+        validate_public_http_url(url)
+        if not _consume_request_budget():
+            return None
+
+        request_kwargs = dict(kwargs)
+        if allow_redirects:
+            request_kwargs["hooks"] = _merge_response_hooks(hooks)
+        elif hooks is not None:
+            request_kwargs["hooks"] = hooks
+
         if method.upper() == "POST":
             resp = requests.post(url, headers=merged_headers, timeout=TIMEOUT,
-                                 verify=False, allow_redirects=True, **kwargs)
+                                 verify=False, allow_redirects=allow_redirects,
+                                 stream=True, **request_kwargs)
         else:
             resp = requests.get(url, headers=merged_headers, timeout=TIMEOUT,
-                                verify=False, allow_redirects=True, **kwargs)
-        return resp
-    except requests.RequestException:
+                                verify=False, allow_redirects=allow_redirects,
+                                stream=True, **request_kwargs)
+        return _read_bounded_response(resp)
+    except (requests.RequestException, ValueError):
         return None
 
 
 def extract_forms(url):
     """Extract all forms from a page, returning form details."""
     resp = fetch(url)
-    if not resp:
+    if resp is None:
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -68,7 +180,7 @@ def extract_forms(url):
 def extract_links(url, max_links=50):
     """Extract links from a page that belong to the same domain."""
     resp = fetch(url)
-    if not resp:
+    if resp is None:
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")

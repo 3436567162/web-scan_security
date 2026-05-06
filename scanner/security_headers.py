@@ -39,7 +39,7 @@ def check_security_headers(url):
     """Check for missing and misconfigured security headers."""
     results = []
     resp = fetch(url)
-    if not resp:
+    if resp is None:
         return results
 
     headers = resp.headers
@@ -106,7 +106,7 @@ def check_security_headers(url):
     if url.startswith("http://"):
         https_url = url.replace("http://", "https://", 1)
         resp_https = fetch(https_url)
-        if not resp_https or resp_https.status_code != 200:
+        if resp_https is None or resp_https.status_code != 200:
             results.append({
                 "type": "medium",
                 "title": "未配置HTTPS重定向",

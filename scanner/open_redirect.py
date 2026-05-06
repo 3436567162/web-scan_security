@@ -52,7 +52,7 @@ def check_open_redirect(url):
             ).geturl()
 
             resp = fetch(test_url, allow_redirects=False)
-            if not resp:
+            if resp is None:
                 continue
 
             import time
@@ -78,7 +78,7 @@ def check_open_redirect(url):
     for payload in path_payloads:
         test_url = f"{parsed.scheme}://{parsed.netloc}{payload}"
         resp = fetch(test_url, allow_redirects=False)
-        if not resp:
+        if resp is None:
             continue
 
         if resp.status_code in (301, 302, 303, 307, 308):

@@ -50,7 +50,7 @@ def _check_url_params(url):
         return results
 
     original_resp = fetch(url)
-    if not original_resp:
+    if original_resp is None:
         return results
     original_text = original_resp.text
 
@@ -58,7 +58,7 @@ def _check_url_params(url):
         for payload in SQLI_PAYLOADS:
             test_url = inject_param(url, param_name, payload)
             resp = fetch(test_url)
-            if not resp:
+            if resp is None:
                 continue
 
             time.sleep(0.2)  # Rate limiting
@@ -113,7 +113,7 @@ def _check_forms(url):
                 except Exception:
                     continue
 
-                if not resp:
+                if resp is None:
                     continue
 
                 time.sleep(0.2)

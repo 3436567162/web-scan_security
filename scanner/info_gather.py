@@ -8,7 +8,7 @@ def gather_info(url):
     """Gather basic information about the target."""
     results = []
     resp = fetch(url)
-    if not resp:
+    if resp is None:
         return [{"type": "info", "title": "连接失败", "detail": f"无法访问目标 {url}"}]
 
     headers = resp.headers
@@ -67,7 +67,7 @@ def gather_info(url):
     admin_paths = ["/admin", "/administrator", "/wp-admin", "/phpmyadmin", "/manager"]
     for path in admin_paths:
         resp_admin = fetch(base + path)
-        if resp_admin and resp_admin.status_code == 200 and len(resp_admin.text) > 100:
+        if resp_admin is not None and resp_admin.status_code == 200 and len(resp_admin.text) > 100:
             results.append({
                 "type": "low",
                 "title": "管理后台路径",

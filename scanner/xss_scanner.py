@@ -1,8 +1,7 @@
 """XSS (Cross-Site Scripting) detection for reflected XSS."""
 
+import re
 import time
-from urllib.parse import urlparse, parse_qs
-
 from .crawler import fetch, extract_forms, extract_params, inject_param
 
 XSS_PAYLOADS = [
@@ -15,13 +14,12 @@ XSS_PAYLOADS = [
     "<body onload=alert(1)>",
 ]
 
-# Markers to detect reflection
-REFLECTION_MARKERS = [
-    "<script>alert(1)</script>",
-    "onerror=alert(1)",
-    "onload=alert(1)",
-    "javascript:alert(1)",
-    "alert(1)",
+# Dangerous unencoded HTML/script fragments. Plain text "alert(1)" is
+# intentionally excluded because it does not prove executable reflection.
+DANGEROUS_HTML_PATTERNS = [
+    re.compile(r"<\s*script\b[^>]*>.*?alert\s*\(\s*1\s*\).*?<\s*/\s*script\s*>", re.IGNORECASE | re.DOTALL),
+    re.compile(r"<[^>]+\s+on(?:error|load)\s*=\s*['\"]?alert\s*\(\s*1\s*\)", re.IGNORECASE),
+    re.compile(r"<[^>]+\s+(?:href|src)\s*=\s*['\"]?javascript\s*:\s*alert\s*\(\s*1\s*\)", re.IGNORECASE),
 ]
 
 
@@ -44,28 +42,23 @@ def _check_url_params(url):
         for payload in XSS_PAYLOADS:
             test_url = inject_param(url, param_name, payload)
             resp = fetch(test_url)
-            if not resp:
+            if resp is None:
                 continue
 
             time.sleep(0.2)
 
-            # Check if payload is reflected in response without encoding
-            for marker in REFLECTION_MARKERS:
-                if marker in resp.text:
-                    results.append({
-                        "type": "high",
-                        "title": "XSS跨站脚本漏洞 (GET参数)",
-                        "detail": (
-                            f"参数 '{param_name}' 存在反射型XSS\n"
-                            f"Payload: {payload}\n"
-                            f"Payload被原样返回到页面中"
-                        ),
-                        "url": test_url,
-                    })
-                    break
-            else:
-                continue
-            break
+            if _has_unencoded_xss_reflection(resp.text, payload):
+                results.append({
+                    "type": "high",
+                    "title": "XSS跨站脚本漏洞 (GET参数)",
+                    "detail": (
+                        f"参数 '{param_name}' 存在反射型XSS\n"
+                        f"Payload: {payload}\n"
+                        f"Payload被原样返回到页面中"
+                    ),
+                    "url": test_url,
+                })
+                break
 
     return results
 
@@ -98,26 +91,33 @@ def _check_forms(url):
                 except Exception:
                     continue
 
-                if not resp:
+                if resp is None:
                     continue
 
                 time.sleep(0.2)
 
-                for marker in REFLECTION_MARKERS:
-                    if marker in resp.text:
-                        results.append({
-                            "type": "high",
-                            "title": "XSS跨站脚本漏洞 (表单)",
-                            "detail": (
-                                f"表单字段 '{inp['name']}' 存在反射型XSS\n"
-                                f"表单Action: {form['action']}\n"
-                                f"Method: {form['method']}\n"
-                                f"Payload: {payload}"
-                            ),
-                        })
-                        break
-                else:
-                    continue
-                break
+                if _has_unencoded_xss_reflection(resp.text, payload):
+                    results.append({
+                        "type": "high",
+                        "title": "XSS跨站脚本漏洞 (表单)",
+                        "detail": (
+                            f"表单字段 '{inp['name']}' 存在反射型XSS\n"
+                            f"表单Action: {form['action']}\n"
+                            f"Method: {form['method']}\n"
+                            f"Payload: {payload}"
+                        ),
+                    })
+                    break
 
     return results
+
+
+def _has_unencoded_xss_reflection(body, payload):
+    """Return True only for raw payload or executable-looking HTML reflection."""
+    if not body:
+        return False
+
+    if payload in body:
+        return True
+
+    return any(pattern.search(body) for pattern in DANGEROUS_HTML_PATTERNS)

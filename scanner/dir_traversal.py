@@ -3,35 +3,40 @@
 from urllib.parse import urlparse
 from .crawler import fetch
 
+
+def _path_rule(path, description, severity):
+    return {"path": path, "description": description, "severity": severity}
+
+
 SENSITIVE_PATHS = [
-    ("/robots.txt", "robots.txt 文件"),
-    ("/.git/config", "Git配置文件泄露"),
-    ("/.git/HEAD", "Git仓库泄露"),
-    ("/.env", "环境配置文件泄露"),
-    ("/.htaccess", "Apache配置文件泄露"),
-    ("/web.config", "IIS配置文件泄露"),
-    ("/phpinfo.php", "PHP信息页面"),
-    ("/info.php", "PHP信息页面"),
-    ("/server-status", "Apache状态页面"),
-    ("/server-info", "Apache信息页面"),
-    ("/.DS_Store", "macOS目录文件泄露"),
-    ("/backup.sql", "数据库备份文件"),
-    ("/backup.zip", "备份压缩包"),
-    ("/db.sql", "数据库备份文件"),
-    ("/dump.sql", "数据库导出文件"),
-    ("/wp-config.php.bak", "WordPress配置备份"),
-    ("/config.php.bak", "PHP配置备份"),
-    ("/.svn/entries", "SVN仓库泄露"),
-    ("/.hg/dirstate", "Mercurial仓库泄露"),
-    ("/crossdomain.xml", "跨域策略文件"),
-    ("/sitemap.xml", "站点地图"),
-    ("/.well-known/security.txt", "安全联系信息"),
-    ("/admin/", "管理后台目录"),
-    ("/wp-admin/", "WordPress管理后台"),
-    ("/api/", "API端点"),
-    ("/debug/", "调试页面"),
-    ("/test/", "测试页面"),
-    ("/console", "控制台页面"),
+    _path_rule("/robots.txt", "robots.txt 文件", "info"),
+    _path_rule("/.git/config", "Git配置文件泄露", "high"),
+    _path_rule("/.git/HEAD", "Git仓库泄露", "high"),
+    _path_rule("/.env", "环境配置文件泄露", "high"),
+    _path_rule("/.htaccess", "Apache配置文件泄露", "high"),
+    _path_rule("/web.config", "IIS配置文件泄露", "high"),
+    _path_rule("/phpinfo.php", "PHP信息页面", "medium"),
+    _path_rule("/info.php", "PHP信息页面", "medium"),
+    _path_rule("/server-status", "Apache状态页面", "medium"),
+    _path_rule("/server-info", "Apache信息页面", "medium"),
+    _path_rule("/.DS_Store", "macOS目录文件泄露", "high"),
+    _path_rule("/backup.sql", "数据库备份文件", "high"),
+    _path_rule("/backup.zip", "备份压缩包", "high"),
+    _path_rule("/db.sql", "数据库备份文件", "high"),
+    _path_rule("/dump.sql", "数据库导出文件", "high"),
+    _path_rule("/wp-config.php.bak", "WordPress配置备份", "high"),
+    _path_rule("/config.php.bak", "PHP配置备份", "high"),
+    _path_rule("/.svn/entries", "SVN仓库泄露", "high"),
+    _path_rule("/.hg/dirstate", "Mercurial仓库泄露", "high"),
+    _path_rule("/crossdomain.xml", "跨域策略文件", "low"),
+    _path_rule("/sitemap.xml", "站点地图", "info"),
+    _path_rule("/.well-known/security.txt", "安全联系信息", "info"),
+    _path_rule("/admin/", "管理后台目录", "medium"),
+    _path_rule("/wp-admin/", "WordPress管理后台", "medium"),
+    _path_rule("/api/", "API端点", "medium"),
+    _path_rule("/debug/", "调试页面", "medium"),
+    _path_rule("/test/", "测试页面", "medium"),
+    _path_rule("/console", "控制台页面", "medium"),
 ]
 
 TRAVERSAL_PAYLOADS = [
@@ -67,16 +72,20 @@ def _check_sensitive_files(base):
     results = []
     found = []
 
-    for path, desc in SENSITIVE_PATHS:
+    for rule in SENSITIVE_PATHS:
+        path = rule["path"]
         test_url = base + path
         resp = fetch(test_url)
-        if not resp:
+        if resp is None:
             continue
 
         if resp.status_code == 200 and len(resp.text) > 10:
             # Verify it's not a generic error page
             if _is_valid_content(resp.text, path):
-                found.append(f"{desc}: {test_url}")
+                found.append({
+                    "severity": rule["severity"],
+                    "detail": f"{rule['description']}: {test_url}",
+                })
 
         import time
         time.sleep(0.1)
@@ -84,9 +93,9 @@ def _check_sensitive_files(base):
     if found:
         for item in found:
             results.append({
-                "type": "medium",
+                "type": item["severity"],
                 "title": "敏感文件/路径暴露",
-                "detail": item,
+                "detail": item["detail"],
             })
     else:
         results.append({
@@ -105,7 +114,7 @@ def _check_directory_listing(base):
 
     for path in test_paths:
         resp = fetch(base + path)
-        if not resp:
+        if resp is None:
             continue
 
         resp_lower = resp.text.lower()
@@ -146,7 +155,7 @@ def _check_path_traversal(url):
             test_url += f"?{parsed.query}"
 
         resp = fetch(test_url)
-        if not resp:
+        if resp is None:
             continue
 
         if marker in resp.text:
@@ -182,5 +191,19 @@ def _is_valid_content(body, path):
         return "=" in body and len(body) < 10000
     if path.endswith("/robots.txt"):
         return "user-agent" in body_lower or "disallow" in body_lower
+    if path.endswith("/sitemap.xml"):
+        return "<urlset" in body_lower or "<sitemapindex" in body_lower
+    if path.endswith("/.well-known/security.txt"):
+        security_directives = [
+            "contact:",
+            "expires:",
+            "encryption:",
+            "policy:",
+            "acknowledgments:",
+            "hiring:",
+        ]
+        return any(directive in body_lower for directive in security_directives)
+    if path.endswith("/crossdomain.xml"):
+        return "<cross-domain-policy" in body_lower
 
     return len(body) > 50

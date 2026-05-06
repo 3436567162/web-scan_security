@@ -12,7 +12,7 @@ def check_cors(url):
         "Origin": "https://evil.com",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
     })
-    if not resp:
+    if resp is None:
         return results
 
     acao = resp.headers.get("Access-Control-Allow-Origin", "")
@@ -49,7 +49,7 @@ def check_cors(url):
 
     # Test 2: Check with null Origin
     resp_null = fetch(url, headers={"Origin": "null"})
-    if resp_null:
+    if resp_null is not None:
         acao_null = resp_null.headers.get("Access-Control-Allow-Origin", "")
         if acao_null == "null":
             results.append({
@@ -63,7 +63,7 @@ def check_cors(url):
     parsed = urlparse(url)
     subdomain_origin = f"https://evil.{parsed.netloc}"
     resp_sub = fetch(url, headers={"Origin": subdomain_origin})
-    if resp_sub:
+    if resp_sub is not None:
         acao_sub = resp_sub.headers.get("Access-Control-Allow-Origin", "")
         if acao_sub == subdomain_origin:
             results.append({
