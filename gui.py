@@ -83,14 +83,36 @@ class ScannerApp:
         main = ttk.Frame(self.root)
         main.pack(fill="both", expand=True, padx=16, pady=(12, 14))
 
+        # 底部报告按钮（先 pack 到底，避免被 body 挤掉）
+        footer = ttk.Frame(main)
+        footer.pack(side="bottom", fill="x", pady=(8, 0))
+        ttk.Button(footer, text="打开 JSON", bootstyle="secondary" if HAVE_TTB else None,
+                   command=lambda: self._open("json")).pack(side="right", padx=3)
+        ttk.Button(footer, text="打开 HTML", bootstyle="secondary" if HAVE_TTB else None,
+                   command=lambda: self._open("html")).pack(side="right", padx=3)
+        ttk.Button(footer, text="打开 PDF", bootstyle="secondary" if HAVE_TTB else None,
+                   command=lambda: self._open("pdf")).pack(side="right", padx=3)
+        ttk.Button(footer, text="报告目录", bootstyle="secondary" if HAVE_TTB else None,
+                   command=self._open_dir).pack(side="right", padx=3)
+
         # 进度条（扫描中不确定模式动画）
         self.progress = ttk.Progressbar(main, mode="indeterminate",
                                         bootstyle="primary" if HAVE_TTB else None)
         self.progress.pack(fill="x", pady=(0, 10))
         self.progress.stop()
 
+        # 主体：左配置栏 + 右结果区
+        body = ttk.Panedwindow(main, orient="horizontal", bootstyle="primary" if HAVE_TTB else None)
+        body.pack(fill="both", expand=True)
+        config_frame = ttk.Frame(body, width=400)
+        body.add(config_frame, weight=0)
+        config_frame.pack_propagate(False)
+        work_frame = ttk.Frame(body)
+        body.add(work_frame, weight=1)
+        self.body = body
+
         # —— 卡片1：扫描目标（居中主卡）——
-        hero = ttk.LabelFrame(main, text="  扫描目标  ")
+        hero = ttk.LabelFrame(config_frame, text="  扫描目标  ")
         hero.pack(fill="x")
         row = ttk.Frame(hero)
         row.pack(fill="x", padx=12, pady=12)
@@ -106,7 +128,7 @@ class ScannerApp:
         self.stop_btn.pack(side="left")
 
         # —— 卡片2：检测项与设置 ——
-        opts = ttk.LabelFrame(main, text="  检测项与设置  ")
+        opts = ttk.LabelFrame(config_frame, text="  检测项与设置  ")
         opts.pack(fill="x", pady=(10, 0))
 
         self.var_sql = tk.BooleanVar(value=True)
@@ -124,29 +146,31 @@ class ScannerApp:
         grid = ttk.Frame(opts)
         grid.pack(fill="x", padx=12, pady=(10, 0))
         for i, (txt, var) in enumerate(checks):
-            r, c = divmod(i, 4)
+            r, c = divmod(i, 2)
             ttk.Checkbutton(grid, text=txt, variable=var).grid(row=r, column=c, sticky="w", padx=6, pady=3)
 
         setrow = ttk.Frame(opts)
-        setrow.pack(fill="x", padx=12, pady=(8, 10))
+        setrow.pack(fill="x", padx=12, pady=(8, 4))
         ttk.Label(setrow, text="超时").pack(side="left")
         self.timeout_var = tk.IntVar(value=10)
-        ttk.Spinbox(setrow, from_=3, to=60, width=4, textvariable=self.timeout_var).pack(side="left", padx=(4, 14))
-        ttk.Label(setrow, text="爬虫深度").pack(side="left")
+        ttk.Spinbox(setrow, from_=3, to=60, width=4, textvariable=self.timeout_var).pack(side="left", padx=(4, 12))
+        ttk.Label(setrow, text="深度").pack(side="left")
         self.crawl_depth_var = tk.IntVar(value=0)
-        ttk.Spinbox(setrow, from_=0, to=5, width=3, textvariable=self.crawl_depth_var).pack(side="left", padx=(4, 14))
-        ttk.Label(setrow, text="最大页数").pack(side="left")
+        ttk.Spinbox(setrow, from_=0, to=5, width=3, textvariable=self.crawl_depth_var).pack(side="left", padx=(4, 12))
+        ttk.Label(setrow, text="页数").pack(side="left")
         self.crawl_max_var = tk.IntVar(value=15)
-        ttk.Spinbox(setrow, from_=1, to=200, width=4, textvariable=self.crawl_max_var).pack(side="left", padx=(4, 14))
+        ttk.Spinbox(setrow, from_=1, to=200, width=4, textvariable=self.crawl_max_var).pack(side="left", padx=(4, 12))
         self.var_exploit = tk.BooleanVar(value=False)
-        ttk.Checkbutton(setrow, text="⚠ 利用/后台取证", variable=self.var_exploit,
-                        command=self._on_exploit_toggle).pack(side="left", padx=(8, 0))
-        ttk.Label(setrow, text="UA").pack(side="left", padx=(12, 2))
+        ttk.Checkbutton(setrow, text="⚠ 利用取证", variable=self.var_exploit,
+                        command=self._on_exploit_toggle).pack(side="left", padx=(4, 0))
+        uarow = ttk.Frame(opts)
+        uarow.pack(fill="x", padx=12, pady=(0, 10))
+        ttk.Label(uarow, text="UA").pack(side="left")
         self.ua_var = tk.StringVar(value=vuln_scanner.DEFAULT_UA)
-        ttk.Entry(setrow, textvariable=self.ua_var, width=30).pack(side="left")
+        ttk.Entry(uarow, textvariable=self.ua_var).pack(side="left", fill="x", expand=True, padx=(6, 0))
 
         # —— 卡片3：认证后扫描（两行排布，避免拥挤）——
-        auth = ttk.LabelFrame(main, text="  认证后扫描（可选）  ")
+        auth = ttk.LabelFrame(config_frame, text="  认证后扫描（可选）  ")
         auth.pack(fill="x", pady=(10, 0))
         ar1 = ttk.Frame(auth); ar1.pack(fill="x", padx=12, pady=(10, 4))
         ttk.Label(ar1, text="登录URL").pack(side="left")
@@ -169,9 +193,9 @@ class ScannerApp:
         self.cookie_var = tk.StringVar()
         ttk.Entry(ar2, textvariable=self.cookie_var).pack(side="left", fill="x", expand=True, padx=(6, 0))
 
-        # —— 结果区：左右双栏（日志 | 结果），MinerU 源|输出 风格 ——
-        paned = ttk.Panedwindow(main, orient="horizontal", bootstyle="primary" if HAVE_TTB else None)
-        paned.pack(fill="both", expand=True, pady=(10, 6))
+        # —— 结果区：上下双栏（日志 / 结果），各占全宽 ——
+        paned = ttk.Panedwindow(work_frame, orient="vertical", bootstyle="primary" if HAVE_TTB else None)
+        paned.pack(fill="both", expand=True, pady=(0, 6))
 
         log_frame = ttk.Frame(paned)
         paned.add(log_frame, weight=1)
@@ -185,7 +209,7 @@ class ScannerApp:
         log_scroll.pack(side="right", fill="y")
 
         result_frame = ttk.Frame(paned)
-        paned.add(result_frame, weight=1)
+        paned.add(result_frame, weight=2)
         ttk.Label(result_frame, text="结果列表", bootstyle="secondary" if HAVE_TTB else None).pack(anchor="w")
         cols = ("sev", "title", "desc", "url")
         self.tree = ttk.Treeview(result_frame, columns=cols, show="headings", bootstyle="primary" if HAVE_TTB else None)
@@ -205,18 +229,6 @@ class ScannerApp:
                         ("medium", "#fff8e1"), ("low", "#e3f2fd"), ("info", "#eceff1")]:
             self.tree.tag_configure(tag, background=bg)
         self.paned = paned
-
-        # —— 底部：报告按钮 ——
-        footer = ttk.Frame(main)
-        footer.pack(fill="x")
-        ttk.Button(footer, text="打开 JSON", bootstyle="secondary" if HAVE_TTB else None,
-                   command=lambda: self._open("json")).pack(side="right", padx=3)
-        ttk.Button(footer, text="打开 HTML", bootstyle="secondary" if HAVE_TTB else None,
-                   command=lambda: self._open("html")).pack(side="right", padx=3)
-        ttk.Button(footer, text="打开 PDF", bootstyle="secondary" if HAVE_TTB else None,
-                   command=lambda: self._open("pdf")).pack(side="right", padx=3)
-        ttk.Button(footer, text="报告目录", bootstyle="secondary" if HAVE_TTB else None,
-                   command=self._open_dir).pack(side="right", padx=3)
 
         self.log("欢迎使用 VulnScanner。本工具仅用于授权安全测试。\n输入目标 URL，配置检测项，点击「开始扫描」。\n\n")
 
