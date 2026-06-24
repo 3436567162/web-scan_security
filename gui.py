@@ -55,46 +55,33 @@ class ScannerApp:
 
     # -- UI 构建 --------------------------------------------------------
     def _build_ui(self):
-        # 侧栏
-        sidebar = tk.Frame(self.root, bg=SIDEBAR_BG, width=210)
-        sidebar.pack(side="left", fill="y")
-        sidebar.pack_propagate(False)
+        # —— 顶部品牌栏（浅色，MinerU 风格）——
+        header = tk.Frame(self.root, bg="#ffffff", height=58)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        tk.Frame(header, bg="#e3e8ef", height=1).pack(side="bottom", fill="x")
+        tk.Label(header, bg="#ffffff", fg=ACCENT, text="◢ VulnScanner",
+                 font=("Microsoft YaHei", 14, "bold")).pack(side="left", padx=18)
+        tk.Label(header, bg="#ffffff", fg="#6b7280", text=APP_SUBTITLE,
+                 font=("Microsoft YaHei", 9)).pack(side="left", pady=(0, 0))
 
-        tk.Label(sidebar, bg=SIDEBAR_BG, fg=ACCENT, text="◢ VulnScanner",
-                 font=("Microsoft YaHei", 15, "bold")).pack(anchor="w", padx=18, pady=(20, 0))
-        tk.Label(sidebar, bg=SIDEBAR_BG, fg="#a9c4e8",
-                 text=APP_SUBTITLE, font=("Microsoft YaHei", 9)).pack(anchor="w", padx=18)
-
-        tk.Frame(sidebar, bg="#1c3a5e", height=1).pack(fill="x", padx=14, pady=14)
-
-        tk.Label(sidebar, bg=SIDEBAR_BG, fg="#7fa6d8", text="状态",
-                 font=("Microsoft YaHei", 8, "bold")).pack(anchor="w", padx=18)
-        stat_row = tk.Frame(sidebar, bg=SIDEBAR_BG)
-        stat_row.pack(fill="x", padx=18, pady=(2, 8))
-        self.dot_canvas = tk.Canvas(stat_row, bg=SIDEBAR_BG, width=12, height=12,
-                                    highlightthickness=0)
-        self.dot_canvas.pack(side="left")
-        self.dot_id = self.dot_canvas.create_oval(2, 2, 10, 10, fill="#3ddc84", outline="")
-        self.status_var = tk.StringVar(value="就绪")
-        tk.Label(stat_row, bg=SIDEBAR_BG, fg=SIDEBAR_FG, textvariable=self.status_var,
-                 font=("Microsoft YaHei", 10), anchor="w").pack(side="left", fill="x", expand=True)
-
-        tk.Label(sidebar, bg=SIDEBAR_BG, fg="#7fa6d8", text="扫描概览",
-                 font=("Microsoft YaHei", 8, "bold")).pack(anchor="w", padx=18)
+        # 右侧：状态灯 + 状态文字 + 概览
+        right = tk.Frame(header, bg="#ffffff")
+        right.pack(side="right", padx=18)
         self.summary_var = tk.StringVar(value="尚未扫描")
-        tk.Label(sidebar, bg=SIDEBAR_BG, fg=SIDEBAR_FG, textvariable=self.summary_var,
-                 font=("Microsoft YaHei", 9), wraplength=170, justify="left").pack(anchor="w", padx=18, pady=(2, 8))
-
-        # 侧栏底部
-        bot = tk.Frame(sidebar, bg=SIDEBAR_BG)
-        bot.pack(side="bottom", fill="x", padx=18, pady=14)
-        tk.Label(bot, bg=SIDEBAR_BG, fg="#5f7fa3",
-                 text=f"v{APP_VERSION}\n仅用于授权安全测试",
-                 font=("Microsoft YaHei", 8), justify="left").pack(anchor="w")
+        tk.Label(right, bg="#ffffff", fg="#374151", textvariable=self.summary_var,
+                 font=("Microsoft YaHei", 9)).pack(side="right", padx=(14, 0))
+        self.status_var = tk.StringVar(value="就绪")
+        tk.Label(right, bg="#ffffff", fg="#374151", textvariable=self.status_var,
+                 font=("Microsoft YaHei", 9)).pack(side="right")
+        self.dot_canvas = tk.Canvas(right, bg="#ffffff", width=12, height=12,
+                                    highlightthickness=0)
+        self.dot_canvas.pack(side="right", padx=(0, 6))
+        self.dot_id = self.dot_canvas.create_oval(2, 2, 10, 10, fill="#3ddc84", outline="")
 
         # 主区
         main = ttk.Frame(self.root)
-        main.pack(side="left", fill="both", expand=True, padx=16, pady=14)
+        main.pack(fill="both", expand=True, padx=16, pady=(12, 14))
 
         # 进度条（扫描中不确定模式动画）
         self.progress = ttk.Progressbar(main, mode="indeterminate",
@@ -102,15 +89,14 @@ class ScannerApp:
         self.progress.pack(fill="x", pady=(0, 10))
         self.progress.stop()
 
-        # —— 卡片1：扫描目标 ——
+        # —— 卡片1：扫描目标（居中主卡）——
         hero = ttk.LabelFrame(main, text="  扫描目标  ")
         hero.pack(fill="x")
         row = ttk.Frame(hero)
-        row.pack(fill="x", padx=12, pady=10)
-        ttk.Label(row, text="登录页 URL").pack(side="left")
+        row.pack(fill="x", padx=12, pady=12)
         self.url_var = tk.StringVar()
         url_entry = ttk.Entry(row, textvariable=self.url_var)
-        url_entry.pack(side="left", fill="x", expand=True, padx=(8, 8))
+        url_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         url_entry.bind("<Return>", lambda _e: self.start_scan())
         self.scan_btn = ttk.Button(row, text="开始扫描", bootstyle="primary" if HAVE_TTB else None,
                                    command=self.start_scan)
@@ -159,35 +145,37 @@ class ScannerApp:
         self.ua_var = tk.StringVar(value=vuln_scanner.DEFAULT_UA)
         ttk.Entry(setrow, textvariable=self.ua_var, width=30).pack(side="left")
 
-        # —— 卡片3：认证后扫描 ——
+        # —— 卡片3：认证后扫描（两行排布，避免拥挤）——
         auth = ttk.LabelFrame(main, text="  认证后扫描（可选）  ")
         auth.pack(fill="x", pady=(10, 0))
-        ar = ttk.Frame(auth); ar.pack(fill="x", padx=12, pady=10)
-        ttk.Label(ar, text="登录URL").pack(side="left")
+        ar1 = ttk.Frame(auth); ar1.pack(fill="x", padx=12, pady=(10, 4))
+        ttk.Label(ar1, text="登录URL").pack(side="left")
         self.login_url_var = tk.StringVar()
-        ttk.Entry(ar, textvariable=self.login_url_var, width=22).pack(side="left", padx=(4, 8))
-        ttk.Label(ar, text="账号").pack(side="left")
+        ttk.Entry(ar1, textvariable=self.login_url_var).pack(side="left", fill="x", expand=True, padx=(6, 14))
+        ttk.Label(ar1, text="账号").pack(side="left")
         self.login_user_var = tk.StringVar()
-        ttk.Entry(ar, textvariable=self.login_user_var, width=12).pack(side="left", padx=(4, 8))
-        ttk.Label(ar, text="密码").pack(side="left")
+        ttk.Entry(ar1, textvariable=self.login_user_var, width=14).pack(side="left", padx=(6, 14))
+        ttk.Label(ar1, text="密码").pack(side="left")
         self.login_pwd_var = tk.StringVar()
-        ttk.Entry(ar, textvariable=self.login_pwd_var, width=12, show="*").pack(side="left", padx=(4, 8))
-        ttk.Label(ar, text="用户字段").pack(side="left")
+        ttk.Entry(ar1, textvariable=self.login_pwd_var, width=14, show="*").pack(side="left", padx=(6, 12))
+        ar2 = ttk.Frame(auth); ar2.pack(fill="x", padx=12, pady=(0, 10))
+        ttk.Label(ar2, text="用户字段").pack(side="left")
         self.login_uf_var = tk.StringVar(value="username")
-        ttk.Entry(ar, textvariable=self.login_uf_var, width=9).pack(side="left", padx=(4, 8))
-        ttk.Label(ar, text="密码字段").pack(side="left")
+        ttk.Entry(ar2, textvariable=self.login_uf_var, width=12).pack(side="left", padx=(6, 14))
+        ttk.Label(ar2, text="密码字段").pack(side="left")
         self.login_pf_var = tk.StringVar(value="password")
-        ttk.Entry(ar, textvariable=self.login_pf_var, width=9).pack(side="left", padx=(4, 8))
-        ttk.Label(ar, text="或 Cookie").pack(side="left", padx=(8, 2))
+        ttk.Entry(ar2, textvariable=self.login_pf_var, width=12).pack(side="left", padx=(6, 14))
+        ttk.Label(ar2, text="或 Cookie").pack(side="left", padx=(6, 2))
         self.cookie_var = tk.StringVar()
-        ttk.Entry(ar, textvariable=self.cookie_var, width=26).pack(side="left", padx=(4, 0))
+        ttk.Entry(ar2, textvariable=self.cookie_var).pack(side="left", fill="x", expand=True, padx=(6, 0))
 
-        # —— 结果区（Notebook）——
-        nb = ttk.Notebook(main)
-        nb.pack(fill="both", expand=True, pady=(10, 6))
+        # —— 结果区：左右双栏（日志 | 结果），MinerU 源|输出 风格 ——
+        paned = ttk.Panedwindow(main, orient="horizontal", bootstyle="primary" if HAVE_TTB else None)
+        paned.pack(fill="both", expand=True, pady=(10, 6))
 
-        log_frame = ttk.Frame(nb)
-        nb.add(log_frame, text="实时日志")
+        log_frame = ttk.Frame(paned)
+        paned.add(log_frame, weight=1)
+        ttk.Label(log_frame, text="实时日志", bootstyle="secondary" if HAVE_TTB else None).pack(anchor="w")
         self.log_text = tk.Text(log_frame, wrap="word", state="disabled",
                                 bg="#11171f", fg="#d6deeb", insertbackground="#d6deeb",
                                 font=("Consolas", 9), padx=10, pady=8, borderwidth=0)
@@ -195,10 +183,10 @@ class ScannerApp:
         self.log_text.configure(yscrollcommand=log_scroll.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         log_scroll.pack(side="right", fill="y")
-        self.nb = nb
 
-        result_frame = ttk.Frame(nb)
-        nb.add(result_frame, text="结果列表")
+        result_frame = ttk.Frame(paned)
+        paned.add(result_frame, weight=1)
+        ttk.Label(result_frame, text="结果列表", bootstyle="secondary" if HAVE_TTB else None).pack(anchor="w")
         cols = ("sev", "title", "desc", "url")
         self.tree = ttk.Treeview(result_frame, columns=cols, show="headings", bootstyle="primary" if HAVE_TTB else None)
         self.tree.heading("sev", text="级别")
@@ -206,9 +194,9 @@ class ScannerApp:
         self.tree.heading("desc", text="描述")
         self.tree.heading("url", text="URL")
         self.tree.column("sev", width=56, anchor="center")
-        self.tree.column("title", width=190)
-        self.tree.column("desc", width=340)
-        self.tree.column("url", width=200)
+        self.tree.column("title", width=180)
+        self.tree.column("desc", width=300)
+        self.tree.column("url", width=180)
         ts = ttk.Scrollbar(result_frame, command=self.tree.yview)
         self.tree.configure(yscrollcommand=ts.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -216,6 +204,7 @@ class ScannerApp:
         for tag, bg in [("critical", "#fbe9f3"), ("high", "#ffebee"),
                         ("medium", "#fff8e1"), ("low", "#e3f2fd"), ("info", "#eceff1")]:
             self.tree.tag_configure(tag, background=bg)
+        self.paned = paned
 
         # —— 底部：报告按钮 ——
         footer = ttk.Frame(main)
@@ -300,8 +289,8 @@ class ScannerApp:
         total = sum(self.live_sev.values())
         s = self.live_sev
         self.summary_var.set(
-            f"实时发现 {total} 项\n严重 {s.get('critical',0)} 高危 {s.get('high',0)} "
-            f"中危 {s.get('medium',0)} 低危 {s.get('low',0)} 信息 {s.get('info',0)}")
+            f"实时发现 {total} · 严重{s.get('critical',0)} 高危{s.get('high',0)} "
+            f"中危{s.get('medium',0)} 低危{s.get('low',0)} 信息{s.get('info',0)}")
 
     def _on_exploit_toggle(self):
         if self.var_exploit.get():
@@ -383,7 +372,7 @@ class ScannerApp:
         except Exception as e:
             messagebox.showerror("报告保存失败", str(e))
         self.status_var.set("扫描完成")
-        self.nb.select(1)  # 切换到结果列表
+        # 双栏并排，日志与结果均可见，无需切页
 
     def _finalize(self, report):
         """扫描结束：用权威计数更新侧栏（结果表已实时填充，不重复插入）。"""
@@ -394,8 +383,8 @@ class ScannerApp:
             ok = sum(1 for e in report.exploits if e.success)
             exploit_part = f"｜利用取证 {len(report.exploits)}(成功 {ok})"
         self.summary_var.set(
-            f"合计 {total} 项\n严重 {s['critical']} 高危 {s['high']} "
-            f"中危 {s['medium']} 低危 {s['low']} 信息 {s['info']}{exploit_part}")
+            f"合计 {total} · 严重{s['critical']} 高危{s['high']} "
+            f"中危{s['medium']} 低危{s['low']} 信息{s['info']}{exploit_part}")
         self.log(f"\n[+] 扫描完成，共 {total} 项发现。\n")
 
     # -- 报告 ----------------------------------------------------------
