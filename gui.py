@@ -51,7 +51,7 @@ class ScannerApp:
     @staticmethod
     def _make_root():
         return ttk.Window(themename="litera", title=f"{APP_TITLE} · {APP_SUBTITLE}",
-                          size=(1180, 760), minsize=(960, 620))
+                          size=(1280, 820), minsize=(1100, 680))
 
     # -- UI 构建 --------------------------------------------------------
     def _build_ui(self):
@@ -61,23 +61,23 @@ class ScannerApp:
         header.pack_propagate(False)
         tk.Frame(header, bg="#e3e8ef", height=1).pack(side="bottom", fill="x")
         tk.Label(header, bg="#ffffff", fg=ACCENT, text="◢ VulnScanner",
-                 font=("Microsoft YaHei", 14, "bold")).pack(side="left", padx=18)
+                 font=("Microsoft YaHei", 16, "bold")).pack(side="left", padx=18)
         tk.Label(header, bg="#ffffff", fg="#6b7280", text=APP_SUBTITLE,
-                 font=("Microsoft YaHei", 9)).pack(side="left", pady=(0, 0))
+                 font=("Microsoft YaHei", 11)).pack(side="left", pady=(0, 0))
 
         # 右侧：状态灯 + 状态文字 + 概览
         right = tk.Frame(header, bg="#ffffff")
         right.pack(side="right", padx=18)
         self.summary_var = tk.StringVar(value="尚未扫描")
         tk.Label(right, bg="#ffffff", fg="#374151", textvariable=self.summary_var,
-                 font=("Microsoft YaHei", 9)).pack(side="right", padx=(14, 0))
+                 font=("Microsoft YaHei", 11)).pack(side="right", padx=(14, 0))
         self.status_var = tk.StringVar(value="就绪")
         tk.Label(right, bg="#ffffff", fg="#374151", textvariable=self.status_var,
-                 font=("Microsoft YaHei", 9)).pack(side="right")
-        self.dot_canvas = tk.Canvas(right, bg="#ffffff", width=12, height=12,
+                 font=("Microsoft YaHei", 11)).pack(side="right")
+        self.dot_canvas = tk.Canvas(right, bg="#ffffff", width=14, height=14,
                                     highlightthickness=0)
         self.dot_canvas.pack(side="right", padx=(0, 6))
-        self.dot_id = self.dot_canvas.create_oval(2, 2, 10, 10, fill="#3ddc84", outline="")
+        self.dot_id = self.dot_canvas.create_oval(2, 2, 12, 12, fill="#3ddc84", outline="")
 
         # 主区
         main = ttk.Frame(self.root)
@@ -104,7 +104,7 @@ class ScannerApp:
         # 主体：左配置栏 + 右结果区
         body = ttk.Panedwindow(main, orient="horizontal", bootstyle="primary" if HAVE_TTB else None)
         body.pack(fill="both", expand=True)
-        config_frame = ttk.Frame(body, width=400)
+        config_frame = ttk.Frame(body, width=460)
         body.add(config_frame, weight=0)
         config_frame.pack_propagate(False)
         work_frame = ttk.Frame(body)
@@ -202,7 +202,7 @@ class ScannerApp:
         ttk.Label(log_frame, text="实时日志", bootstyle="secondary" if HAVE_TTB else None).pack(anchor="w")
         self.log_text = tk.Text(log_frame, wrap="word", state="disabled",
                                 bg="#11171f", fg="#d6deeb", insertbackground="#d6deeb",
-                                font=("Consolas", 9), padx=10, pady=8, borderwidth=0)
+                                font=("Consolas", 11), padx=10, pady=8, borderwidth=0)
         log_scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=log_scroll.set)
         self.log_text.pack(side="left", fill="both", expand=True)
@@ -424,6 +424,18 @@ class ScannerApp:
 
 def main():
     root = ScannerApp._make_root()
+    # 全局放大字体
+    style = ttk.Style()
+    base = ("Microsoft YaHei", 11)
+    style.configure(".", font=base)
+    style.configure("TButton", font=base)
+    style.configure("TCheckbutton", font=base)
+    style.configure("TEntry", font=base)
+    style.configure("TSpinbox", font=base)
+    style.configure("TLabel", font=base)
+    style.configure("TLabelframe.Label", font=("Microsoft YaHei", 11, "bold"))
+    style.configure("Treeview", font=base, rowheight=30)
+    style.configure("Treeview.Heading", font=("Microsoft YaHei", 11, "bold"))
     ScannerApp(root)
     root.mainloop()
     return 0
