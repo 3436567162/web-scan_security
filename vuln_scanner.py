@@ -342,7 +342,7 @@ class VulnScanner:
                  auth: Optional[dict] = None, cookie: Optional[str] = None,
                  do_ssti: bool = True, do_ssrf: bool = True,
                  do_redirect: bool = True, do_upload: bool = True,
-                 on_log=None, cancel=None):
+                 on_log=None, on_finding=None, cancel=None):
         self.url = url if url.startswith("http") else "http://" + url
         parsed = urlparse(self.url)
         self.host = parsed.hostname or ""
@@ -361,6 +361,7 @@ class VulnScanner:
         self.do_redirect = do_redirect
         self.do_upload = do_upload
         self.on_log = on_log or (lambda msg: None)
+        self.on_finding = on_finding or (lambda finding: None)
         self.cancel = cancel or (lambda: False)
         # 已确认的可利用向量（供渗透取证模块复用）
         self.confirmed_sqli: list = []      # [(form, field)]
@@ -375,6 +376,15 @@ class VulnScanner:
             target=self.url,
             started_at=datetime.datetime.now().isoformat(timespec="seconds"),
         )
+        # 挂钩：每新增一条发现即回调（供 GUI 实时刷新）
+        _orig_add = self.report.add
+        def _hooked_add(finding):
+            _orig_add(finding)
+            try:
+                self.on_finding(finding)
+            except Exception:
+                pass
+        self.report.add = _hooked_add
 
     # -- 工具方法 -------------------------------------------------------
 

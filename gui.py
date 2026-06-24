@@ -40,6 +40,10 @@ class ScannerApp:
         self.report = None
         self.last_files = {}
         self.cancel_flag = {"stop": False}
+        self.anim_running = False
+        self._dot_phase = 0
+        self._txt_phase = 0
+        self.live_sev = {k: 0 for k in SEV_LABEL}
         self._build_ui()
         self._refresh_button_state(running=False)
 
@@ -65,9 +69,15 @@ class ScannerApp:
 
         tk.Label(sidebar, bg=SIDEBAR_BG, fg="#7fa6d8", text="状态",
                  font=("Microsoft YaHei", 8, "bold")).pack(anchor="w", padx=18)
+        stat_row = tk.Frame(sidebar, bg=SIDEBAR_BG)
+        stat_row.pack(fill="x", padx=18, pady=(2, 8))
+        self.dot_canvas = tk.Canvas(stat_row, bg=SIDEBAR_BG, width=12, height=12,
+                                    highlightthickness=0)
+        self.dot_canvas.pack(side="left")
+        self.dot_id = self.dot_canvas.create_oval(2, 2, 10, 10, fill="#3ddc84", outline="")
         self.status_var = tk.StringVar(value="就绪")
-        tk.Label(sidebar, bg=SIDEBAR_BG, fg=SIDEBAR_FG, textvariable=self.status_var,
-                 font=("Microsoft YaHei", 10), wraplength=170, justify="left").pack(anchor="w", padx=18, pady=(2, 8))
+        tk.Label(stat_row, bg=SIDEBAR_BG, fg=SIDEBAR_FG, textvariable=self.status_var,
+                 font=("Microsoft YaHei", 10), anchor="w").pack(side="left", fill="x", expand=True)
 
         tk.Label(sidebar, bg=SIDEBAR_BG, fg="#7fa6d8", text="扫描概览",
                  font=("Microsoft YaHei", 8, "bold")).pack(anchor="w", padx=18)
@@ -85,6 +95,12 @@ class ScannerApp:
         # 主区
         main = ttk.Frame(self.root)
         main.pack(side="left", fill="both", expand=True, padx=16, pady=14)
+
+        # 进度条（扫描中不确定模式动画）
+        self.progress = ttk.Progressbar(main, mode="indeterminate",
+                                        bootstyle="primary" if HAVE_TTB else None)
+        self.progress.pack(fill="x", pady=(0, 10))
+        self.progress.stop()
 
         # —— 卡片1：扫描目标 ——
         hero = ttk.LabelFrame(main, text="  扫描目标  ")
@@ -229,7 +245,63 @@ class ScannerApp:
     def _refresh_button_state(self, running):
         self.scan_btn.configure(state="disabled" if running else "normal")
         self.stop_btn.configure(state="normal" if running else "disabled")
-        self.status_var.set("扫描中…" if running else "就绪")
+        if not running:
+            self.status_var.set("就绪" if self.report is None else "完成")
+
+    # -- 动态效果 ------------------------------------------------------
+    DOT_RUN = ["#2f6fed", "#7aa6f5", "#c9d8fb"]
+
+    def _anim_start(self):
+        self.anim_running = True
+        self._dot_phase = 0
+        self._txt_phase = 0
+        try:
+            self.progress.start(12)
+        except Exception:
+            pass
+        self._pulse_dot()
+        self._anim_status()
+
+    def _anim_stop(self):
+        self.anim_running = False
+        try:
+            self.progress.stop()
+        except Exception:
+            pass
+        self.dot_canvas.itemconfig(self.dot_id, fill="#3ddc84")
+
+    def _pulse_dot(self):
+        if not self.anim_running:
+            return
+        c = self.DOT_RUN[self._dot_phase % len(self.DOT_RUN)]
+        self.dot_canvas.itemconfig(self.dot_id, fill=c)
+        self._dot_phase += 1
+        self.root.after(300, self._pulse_dot)
+
+    def _anim_status(self):
+        if not self.anim_running:
+            return
+        dots = "." * (self._txt_phase % 4)
+        self.status_var.set(f"扫描中{dots}")
+        self._txt_phase += 1
+        self.root.after(400, self._anim_status)
+
+    def _on_finding_thread(self, finding):
+        """扫描器工作线程回调 → 转到 UI 线程实时插入。"""
+        self.root.after(0, lambda f=finding: self._live_finding(f))
+
+    def _live_finding(self, finding):
+        """发现一条即实时插入结果表 + 更新侧栏计数。"""
+        self.tree.insert("", "end",
+                         values=(SEV_LABEL.get(finding.severity, finding.severity),
+                                 finding.title, finding.description, finding.url),
+                         tags=(finding.severity,))
+        self.live_sev[finding.severity] = self.live_sev.get(finding.severity, 0) + 1
+        total = sum(self.live_sev.values())
+        s = self.live_sev
+        self.summary_var.set(
+            f"实时发现 {total} 项\n严重 {s.get('critical',0)} 高危 {s.get('high',0)} "
+            f"中危 {s.get('medium',0)} 低危 {s.get('low',0)} 信息 {s.get('info',0)}")
 
     def _on_exploit_toggle(self):
         if self.var_exploit.get():
@@ -258,9 +330,11 @@ class ScannerApp:
 
         self.tree.delete(*self.tree.get_children())
         self.last_files = {}
+        self.live_sev = {k: 0 for k in SEV_LABEL}
         self.cancel_flag["stop"] = False
         self._refresh_button_state(running=True)
         self.summary_var.set("扫描进行中…")
+        self._anim_start()
 
         auth = None
         if self.login_url_var.get().strip() and self.login_user_var.get().strip():
@@ -281,7 +355,8 @@ class ScannerApp:
             auth=auth, cookie=cookie,
             do_ssti=self.var_ssti.get(), do_ssrf=self.var_ssrf.get(),
             do_redirect=self.var_redirect.get(), do_upload=self.var_upload.get(),
-            on_log=self.log, cancel=lambda: self.cancel_flag["stop"],
+            on_log=self.log, on_finding=self._on_finding_thread,
+            cancel=lambda: self.cancel_flag["stop"],
         )
 
         def worker():
@@ -296,11 +371,12 @@ class ScannerApp:
         self.status_var.set("正在停止…")
 
     def _scan_done(self):
+        self._anim_stop()
         self._refresh_button_state(running=False)
         if self.report is None:
             self.status_var.set("扫描失败")
             return
-        self._render_results(self.report)
+        self._finalize(self.report)
         try:
             json_p, html_p, pdf_p = vuln_scanner.save_reports(self.report, "reports")
             self.last_files = {"json": json_p, "html": html_p, "pdf": pdf_p}
@@ -309,12 +385,8 @@ class ScannerApp:
         self.status_var.set("扫描完成")
         self.nb.select(1)  # 切换到结果列表
 
-    def _render_results(self, report):
-        for f in report.sorted_findings():
-            self.tree.insert("", "end",
-                             values=(SEV_LABEL.get(f.severity, f.severity),
-                                     f.title, f.description, f.url),
-                             tags=(f.severity,))
+    def _finalize(self, report):
+        """扫描结束：用权威计数更新侧栏（结果表已实时填充，不重复插入）。"""
         s = report.by_severity
         total = sum(s.values())
         exploit_part = ""
