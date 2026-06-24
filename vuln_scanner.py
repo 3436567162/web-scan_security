@@ -337,7 +337,12 @@ SECURITY_HEADERS = {
 class VulnScanner:
     def __init__(self, url: str, timeout: int = 10, ua: str = DEFAULT_UA,
                  do_sql: bool = True, do_xss: bool = True, do_paths: bool = True,
-                 do_creds: bool = True, do_exploit: bool = False, on_log=None, cancel=None):
+                 do_creds: bool = True, do_exploit: bool = False,
+                 crawl_depth: int = 0, crawl_max_pages: int = 1,
+                 auth: Optional[dict] = None, cookie: Optional[str] = None,
+                 do_ssti: bool = True, do_ssrf: bool = True,
+                 do_redirect: bool = True, do_upload: bool = True,
+                 on_log=None, cancel=None):
         self.url = url if url.startswith("http") else "http://" + url
         parsed = urlparse(self.url)
         self.host = parsed.hostname or ""
@@ -347,14 +352,25 @@ class VulnScanner:
         self.do_paths = do_paths
         self.do_creds = do_creds
         self.do_exploit = do_exploit
+        self.crawl_depth = crawl_depth
+        self.crawl_max_pages = max(1, crawl_max_pages)
+        self.auth = auth            # {"login_url","user_field","pwd_field","user","password"}
+        self.cookie = cookie        # 原始 Cookie 字符串
+        self.do_ssti = do_ssti
+        self.do_ssrf = do_ssrf
+        self.do_redirect = do_redirect
+        self.do_upload = do_upload
         self.on_log = on_log or (lambda msg: None)
         self.cancel = cancel or (lambda: False)
         # 已确认的可利用向量（供渗透取证模块复用）
         self.confirmed_sqli: list = []      # [(form, field)]
         self.confirmed_param_sqli: list = []  # [(base_url, param, qs)]
         self.confirmed_creds: list = []     # [(form, user_field, pwd_field, user, pwd)]
+        self.scanned_urls: set = set()      # 去重已扫描 URL
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": ua, "Accept": "*/*"})
+        if cookie:
+            self.session.headers.update({"Cookie": cookie})
         self.report = ScanReport(
             target=self.url,
             started_at=datetime.datetime.now().isoformat(timespec="seconds"),
@@ -388,8 +404,113 @@ class VulnScanner:
 
     # -- 主流程 ---------------------------------------------------------
 
+    def _authenticate(self) -> None:
+        """认证：自动登录或使用粘贴的 Cookie，使后续请求携带会话。"""
+        if self.cookie:
+            self._log("[*] 使用提供的 Cookie 进行认证后扫描…")
+            return
+        if not self.auth:
+            return
+        a = self.auth
+        self._log(f"[*] 登录 {a.get('login_url')} 以获取会话…")
+        data = {a.get("user_field", "username"): a.get("user", ""),
+                a.get("pwd_field", "password"): a.get("password", "")}
+        resp = self._post(a["login_url"], data=data)
+        if resp is None:
+            # 可能登录接口是 GET
+            resp = self._get(a["login_url"], params=data)
+        if resp is None:
+            self._log("[!] 登录请求失败，将以未认证状态继续。")
+            return
+        if self.session.cookies:
+            self._log(f"[*] 登录完成，获得会话 Cookie：{', '.join(c.name for c in self.session.cookies)}")
+        else:
+            self._log("[*] 登录请求已发送，但未获得 Cookie（可能凭据无效或为无状态接口）。")
+
+    def crawl(self, start_resp: requests.Response) -> list:
+        """BFS 爬取同源页面，返回 [(url, resp, forms)]。深度/页数受配置限制。"""
+        results = []
+        visited: set = set()
+        queue = [(self.url, 0)]
+        visited.add(self._norm_url(self.url))
+        while queue and len(results) < self.crawl_max_pages:
+            if self._cancelled():
+                break
+            url, depth = queue.pop(0)
+            resp = start_resp if url == self.url and start_resp is not None else self._get(url)
+            if resp is None or resp.status_code >= 400:
+                continue
+            forms = self.parse_forms(resp.text)
+            results.append((url, resp, forms))
+            if depth >= self.crawl_depth:
+                continue
+            # 抽取同源链接
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = a["href"].split("#")[0].strip()
+                if not href or href.startswith(("javascript:", "mailto:", "tel:")):
+                    continue
+                next_url = urljoin(url, href)
+                if urlparse(next_url).hostname != self.host:
+                    continue
+                nu = self._norm_url(next_url)
+                if nu in visited:
+                    continue
+                visited.add(nu)
+                queue.append((next_url, depth + 1))
+        return results
+
+    @staticmethod
+    def _norm_url(u: str) -> str:
+        p = urlparse(u)
+        return f"{p.scheme}://{p.netloc}{p.path}"
+
+    def scan_page(self, url: str, resp: requests.Response, forms: list) -> None:
+        """对单个页面运行各项检测。"""
+        self._log(f"[*] 扫描页面：{url}")
+        if forms:
+            login_like = any(f.is_login_like for f in forms)
+            self.report.add(Finding(
+                title="登录表单枚举",
+                severity="info",
+                description=f"发现 {len(forms)} 个表单。" + (
+                    "其中可能包含登录表单。" if login_like else ""),
+                url=url,
+            ))
+        if self.do_sql:
+            self.test_sql_injection(forms)
+        if self._cancelled():
+            return
+        if self.do_xss:
+            self.test_xss(resp, url)
+        if self._cancelled():
+            return
+        if self.do_sql:
+            self.test_param_injection(url)
+            self.test_param_sqli(url)
+        if self._cancelled():
+            return
+        if self.do_ssti:
+            self.test_ssti(url, forms)
+        if self.do_ssrf:
+            self.test_ssrf(url)
+        if self.do_redirect:
+            self.test_open_redirect(url)
+        if self.do_upload:
+            self.test_file_upload(forms, url)
+        if self._cancelled():
+            return
+        if self.do_creds and forms:
+            login_forms = [f for f in forms if f.is_login_like]
+            if login_forms:
+                self.test_default_creds(forms)
+
     def run(self) -> ScanReport:
         self._log(f"[*] 目标：{self.url}")
+        if self.auth or self.cookie:
+            self._authenticate()
+        if self._cancelled():
+            return self._finish()
         resp = self._get(self.url)
         if resp is None:
             self.report.add(Finding(
@@ -416,39 +537,22 @@ class VulnScanner:
         self.check_tls()
         if self._cancelled():
             return self._finish()
-        forms = self.parse_forms(resp.text)
-        self.report.add(Finding(
-            title="登录表单枚举",
-            severity="info",
-            description=f"发现 {len(forms)} 个表单。" + (
-                "其中可能包含登录表单。" if any(f.is_login_like for f in forms) else ""),
-            url=self.url,
-        ))
-        if self.do_sql:
-            self._log("[*] 探测 SQL 注入（错误回显 / 时间盲注 / 布尔盲注）…")
-            self.test_sql_injection(forms)
+
+        # 爬取页面（深度 0 = 仅首页）
+        pages = self.crawl(resp)
+        self._log(f"[*] 爬取完成，共 {len(pages)} 个页面待扫描。")
         if self._cancelled():
             return self._finish()
-        if self.do_xss:
-            self._log("[*] 探测 XSS 反射点…")
-            self.test_xss(resp)
-        if self._cancelled():
-            return self._finish()
-        if self.do_sql:
-            self._log("[*] 探测参数注入（目录遍历 / 命令注入 / CRLF）…")
-            self.test_param_injection()
-            self._log("[*] 探测 GET 参数 SQL 注入…")
-            self.test_param_sqli()
-        if self._cancelled():
-            return self._finish()
-        if self.do_creds:
-            self._log("[*] 探测弱口令 / 用户枚举…")
-            self.test_default_creds(forms)
-        if self._cancelled():
-            return self._finish()
+
         if self.do_paths:
             self._log("[*] 探测敏感路径…")
             self.probe_common_paths()
+
+        for url, presp, forms in pages:
+            if self._cancelled():
+                break
+            self.scan_page(url, presp, forms)
+
         if self.do_exploit:
             self._log("[*] 漏洞利用取证（尝试进入后台 / 提取信息）…")
             self.attempt_exploitation()
@@ -744,15 +848,16 @@ class VulnScanner:
                   for k, v in qs.items()}
         return self._get(base, params=params)
 
-    def test_param_sqli(self) -> None:
+    def test_param_sqli(self, url: str = "") -> None:
         """对 URL 上的每个 GET 参数做 SQL 注入探测（错误回显 / 布尔盲注 / 时间盲注）。"""
-        parsed = urlparse(self.url)
+        target = url or self.url
+        parsed = urlparse(target)
         if not parsed.query:
             return
         from urllib.parse import parse_qs
         qs = parse_qs(parsed.query, keep_blank_values=True)
-        base = self.url.split("?")[0]
-        baseline_resp = self._get(self.url)
+        base = target.split("?")[0]
+        baseline_resp = self._get(target)
         baseline_t = baseline_resp.elapsed.total_seconds() if baseline_resp else 0.0
         baseline_len = len(baseline_resp.text) if baseline_resp else 0
 
@@ -809,16 +914,17 @@ class VulnScanner:
                     self.confirmed_param_sqli.append((base, key, qs))
                     break
 
-    def test_param_injection(self) -> None:
+    def test_param_injection(self, url: str = "") -> None:
         """对 URL 上的每个参数做目录遍历与命令注入（时间盲注）探测。"""
-        parsed = urlparse(self.url)
+        target = url or self.url
+        parsed = urlparse(target)
         if not parsed.query:
             return
         from urllib.parse import parse_qs
         qs = parse_qs(parsed.query, keep_blank_values=True)
-        base = self.url.split("?")[0]
+        base = target.split("?")[0]
         # 基准
-        baseline_resp = self._get(self.url)
+        baseline_resp = self._get(target)
         baseline = baseline_resp.elapsed.total_seconds() if baseline_resp else 0.0
 
         for key in qs:
@@ -881,12 +987,13 @@ class VulnScanner:
 
     # -- XSS 探测 -------------------------------------------------------
 
-    def test_xss(self, base_resp: requests.Response) -> None:
-        parsed = urlparse(self.url)
+    def test_xss(self, base_resp: requests.Response, url: str = "") -> None:
+        target = url or self.url
+        parsed = urlparse(target)
         if parsed.query:
             from urllib.parse import parse_qs
             qs = parse_qs(parsed.query, keep_blank_values=True)
-            base = self.url.split("?")[0]
+            base = target.split("?")[0]
             for key in qs:
                 for probe in XSS_PROBES:
                     params = {k: (probe if k == key else (v[0] if v else ""))
@@ -1465,6 +1572,250 @@ class VulnScanner:
         status = "成功" if ev.success else "未成功"
         self._log(f"    [利用] {ev.technique} → {status}：{ev.excerpt[:80]}")
 
+    # -- SSTI / SSRF / 开放重定向 / 文件上传 --------------------------
+
+    # SSTI 探测：注入模板表达式，检测数学运算结果是否被求值回显
+    SSTI_PROBES = [
+        ("{{49*49}}", "2401"),   # Jinja2 / Twig / Tornado
+        ("{{7*7}}", "49"),
+        ("${7*7}", "49"),        # FreeMarker / Velocity
+        ("<%=7*7%>", "49"),      # ERB
+        ("#{7*7}", "49"),        # Ruby / Spring
+        ("{7*7}", "49"),         # Smarty
+    ]
+
+    def test_ssti(self, url: str, forms: list) -> None:
+        target = url or self.url
+        parsed = urlparse(target)
+        # GET 参数
+        if parsed.query:
+            from urllib.parse import parse_qs
+            qs = parse_qs(parsed.query, keep_blank_values=True)
+            base = target.split("?")[0]
+            for key in qs:
+                if self._cancelled():
+                    return
+                for payload, expect in self.SSTI_PROBES:
+                    params = {k: (payload if k == key else (v[0] if v else ""))
+                              for k, v in qs.items()}
+                    resp = self._get(base, params=params)
+                    if resp and expect in resp.text and payload not in resp.text:
+                        self.report.add(Finding(
+                            title="疑似 SSTI（服务端模板注入）",
+                            severity="high",
+                            description=f"参数 {key} 注入 {payload!r} 后响应出现求值结果 {expect}，"
+                                        f"模板表达式被执行。",
+                            evidence=resp.url,
+                            recommendation="模板引擎使用沙箱/自动转义，禁止渲染用户输入，禁用危险函数。",
+                            url=resp.url,
+                        ))
+                        break
+        # 表单字段
+        for form in forms:
+            if self._cancelled():
+                return
+            field = self._injectable_field(form)
+            if not field:
+                continue
+            for payload, expect in self.SSTI_PROBES:
+                resp = self._send_form_single(form, field, payload)
+                if resp and expect in resp.text and payload not in resp.text:
+                    self.report.add(Finding(
+                        title="疑似 SSTI（服务端模板注入）",
+                        severity="high",
+                        description=f"表单字段 {field} 注入 {payload!r} 后响应出现求值结果 {expect}。",
+                        evidence=f"表单 #{form.index} action={form.action}",
+                        recommendation="模板引擎使用沙箱/自动转义，禁止渲染用户输入。",
+                        url=form.action,
+                    ))
+                    break
+
+    def _start_callback(self):
+        """启动本机回调服务器，返回 (srv, port, hits)。"""
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from urllib.parse import urlparse as _up, parse_qs as _pqs
+        hits: dict = {}
+
+        class _CB(BaseHTTPRequestHandler):
+            def do_GET(self):
+                q = _pqs(_up(self.path).query)
+                tid = (q.get("id") or [""])[0]
+                if tid:
+                    hits[tid] = {"path": self.path, "ua": self.headers.get("User-Agent", "")}
+                self.send_response(200)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), _CB)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv, srv.server_address[1], hits
+
+    def test_ssrf(self, url: str) -> None:
+        """注入本机回调 URL，探测服务端是否发起外联请求（SSRF）。"""
+        target = url or self.url
+        parsed = urlparse(target)
+        if not parsed.query:
+            return
+        from urllib.parse import parse_qs
+        qs = parse_qs(parsed.query, keep_blank_values=True)
+        base = target.split("?")[0]
+        try:
+            srv, port, hits = self._start_callback()
+        except Exception as e:
+            self._log(f"[*] SSRF 回调服务器启动失败：{e}")
+            return
+        cb = f"http://127.0.0.1:{port}"
+        payloads = [cb, "http://localhost:{port}", f"http://127.0.0.1:{port}"]
+        found = False
+        for key in qs:
+            if self._cancelled():
+                break
+            for idx, p in enumerate(payloads):
+                tag = f"ssrf_{key}_{idx}"
+                full_cb = f"{cb}/?id={tag}"
+                val = p.replace("{port}", str(port)) if "{port}" in p else full_cb
+                params = {k: (val if k == key else (v[0] if v else "")) for k, v in qs.items()}
+                # 关键：不跟随跳转，避免扫描器自身跟随 302 命中回调造成误报
+                try:
+                    self.session.get(base, params=params, timeout=self.timeout,
+                                     allow_redirects=False)
+                except requests.RequestException:
+                    continue
+            # 等待回调
+            for _ in range(10):
+                if any(k.startswith(f"ssrf_{key}_") for k in hits) or self._cancelled():
+                    break
+                time.sleep(0.3)
+            hit_tags = [k for k in hits if k.startswith(f"ssrf_{key}_")]
+            if hit_tags:
+                ev = ExploitEvidence(
+                    technique="SSRF 服务端请求伪造",
+                    target=f"参数 {key} @ {target}",
+                    success=True,
+                    data={"注入点": key, "回连": cb + hits[hit_tags[0]]["path"],
+                          "UA": hits[hit_tags[0]]["ua"][:80]},
+                    excerpt=f"参数 {key} 注入本机回调 URL 后，服务端发起了对 {cb} 的请求。",
+                    url=target,
+                )
+                self.report.add(Finding(
+                    title="疑似 SSRF（服务端请求伪造）",
+                    severity="critical",
+                    description=f"参数 {key} 注入本机回调 URL 后，服务端发起了对 {cb} 的外联请求。",
+                    evidence=target,
+                    recommendation="对服务端获取的 URL 做白名单/内网地址过滤，禁用 file:// 等协议。",
+                    url=target,
+                ))
+                self._record(ev)
+                found = True
+                break
+        srv.shutdown()
+        if not found:
+            self._log("[*] SSRF 探测：未观察到服务端外联回连。")
+
+    REDIRECT_TARGETS = [
+        "https://vulnscan-redirect.example/",
+        "//vulnscan-redirect.example/",
+        "https://vulnscan-redirect.example/",
+    ]
+
+    def test_open_redirect(self, url: str) -> None:
+        """注入外部跳转目标，检测响应是否跳转到外部域（开放重定向）。"""
+        target = url or self.url
+        parsed = urlparse(target)
+        if not parsed.query:
+            return
+        from urllib.parse import parse_qs
+        qs = parse_qs(parsed.query, keep_blank_values=True)
+        base = target.split("?")[0]
+        marker = "vulnscan-redirect.example"
+        for key in qs:
+            if self._cancelled():
+                return
+            for payload in self.REDIRECT_TARGETS:
+                params = {k: (payload if k == key else (v[0] if v else "")) for k, v in qs.items()}
+                # 不跟随跳转，直接看 Location 头
+                try:
+                    resp = self.session.get(base, params=params, timeout=self.timeout,
+                                            allow_redirects=False)
+                except requests.RequestException:
+                    continue
+                loc = resp.headers.get("Location", "")
+                if marker in loc:
+                    self.report.add(Finding(
+                        title="疑似开放重定向",
+                        severity="medium",
+                        description=f"参数 {key} 注入外部 URL 后，响应 Location 头跳转到 {loc[:80]}。",
+                        evidence=f"Location: {loc[:120]}",
+                        recommendation="对重定向目标做白名单校验，禁止跳转到外部域。",
+                        url=resp.url,
+                    ))
+                    break
+
+    def test_file_upload(self, forms: list, url: str) -> None:
+        """检测文件上传表单；授权模式下探测良性上传是否被接受。"""
+        upload_forms = []
+        for form in forms:
+            if any(ftype == "file" for _, ftype in form.fields):
+                upload_forms.append(form)
+        if not upload_forms:
+            return
+        for form in upload_forms:
+            self.report.add(Finding(
+                title="存在文件上传功能",
+                severity="medium",
+                description=f"表单 #{form.index} 含文件上传字段（action={form.action}）。"
+                            f"需人工确认是否限制类型/校验内容。",
+                evidence=f"表单 #{form.index} action={form.action}",
+                recommendation="校验文件类型/扩展名/内容，重命名存储，禁止可执行扩展名，单独域名/静态服务提供下载。",
+                url=form.action,
+            ))
+            # 授权模式下探测良性上传
+            if self.do_exploit and not self._cancelled():
+                self._probe_upload(form, url)
+
+    def _probe_upload(self, form: "FormInfo", page_url: str) -> None:
+        """上传一个良性文本文件，检测是否被服务端接受/可访问。"""
+        try:
+            files = {"file": ("vulnscan_probe.txt", "vulnscan upload probe", "text/plain")}
+        except Exception:
+            return
+        # 收集其他字段填中性值
+        data = {n: "test" for n, ft in form.fields if n and ft != "file"}
+        try:
+            resp = self.session.post(form.action, data=data, files=files,
+                                     timeout=self.timeout, allow_redirects=True)
+        except requests.RequestException:
+            return
+        if resp is None:
+            return
+        body = (resp.text or "").lower()
+        success_kw = ("upload", "成功", "success", "saved", "uploaded", "vulnscan_probe")
+        accepted = resp.status_code in (200, 201) and any(k in body for k in success_kw)
+        if accepted:
+            ev = ExploitEvidence(
+                technique="任意文件上传探测",
+                target=f"表单 #{form.index} action={form.action}",
+                success=True,
+                data={"上传文件": "vulnscan_probe.txt", "状态码": str(resp.status_code),
+                      "响应长度": str(len(resp.content))},
+                excerpt="良性文本文件被服务端接受上传（仅证明可上传，未上传可执行文件）。",
+                url=form.action,
+            )
+            self.report.add(Finding(
+                title="疑似任意文件上传",
+                severity="high",
+                description=f"向表单上传良性文本文件后被服务端接受（状态码 {resp.status_code}）。"
+                            f"需确认是否限制可执行扩展名。",
+                evidence=form.action,
+                recommendation="校验文件类型/扩展名/内容，重命名存储，禁止可执行扩展名。",
+                url=form.action,
+            ))
+            self._record(ev)
+
     # -- 敏感路径探测 ---------------------------------------------------
 
     def probe_common_paths(self) -> None:
@@ -1833,8 +2184,22 @@ def main() -> int:
     parser.add_argument("--no-xss", action="store_true", help="跳过 XSS 探测")
     parser.add_argument("--no-paths", action="store_true", help="跳过敏感路径探测")
     parser.add_argument("--no-creds", action="store_true", help="跳过弱口令 / 用户枚举探测")
+    parser.add_argument("--no-ssti", action="store_true", help="跳过 SSTI 探测")
+    parser.add_argument("--no-ssrf", action="store_true", help="跳过 SSRF 探测")
+    parser.add_argument("--no-redirect", action="store_true", help="跳过开放重定向探测")
+    parser.add_argument("--no-upload", action="store_true", help="跳过文件上传检测")
     parser.add_argument("--exploit", action="store_true",
                         help="发现可确认漏洞时，尝试利用并提取后台信息（主动利用，需授权）")
+    parser.add_argument("--crawl-depth", type=int, default=0,
+                        help="站点爬虫深度（0=仅扫描给定 URL，默认 0）")
+    parser.add_argument("--crawl-max-pages", type=int, default=15,
+                        help="爬虫最多抓取页面数（默认 15）")
+    parser.add_argument("--login-url", help="认证后扫描：登录接口 URL")
+    parser.add_argument("--login-user-field", default="username", help="登录表单用户名字段名")
+    parser.add_argument("--login-pwd-field", default="password", help="登录表单密码字段名")
+    parser.add_argument("--login-user", help="登录用户名")
+    parser.add_argument("--login-password", help="登录密码")
+    parser.add_argument("--cookie", help="认证后扫描：直接粘贴 Cookie 字符串")
     parser.add_argument("--ua", default=DEFAULT_UA, help="自定义 User-Agent")
     parser.add_argument("--out", default="reports", help="报告输出目录")
     args = parser.parse_args()
@@ -1846,11 +2211,25 @@ def main() -> int:
         print(f"{Fore.RED}[!] 已启用利用取证（--exploit）。该操作将主动利用已发现漏洞并提取信息，"
               f"属于侵入性操作。请确认已获得书面授权。{Style.RESET_ALL}")
 
+    auth = None
+    if args.login_url and args.login_user and args.login_password:
+        auth = {
+            "login_url": args.login_url,
+            "user_field": args.login_user_field,
+            "pwd_field": args.login_pwd_field,
+            "user": args.login_user,
+            "password": args.login_password,
+        }
+
     scanner = VulnScanner(
         args.url, timeout=args.timeout, ua=args.ua,
         do_sql=not args.no_sql, do_xss=not args.no_xss,
         do_paths=not args.no_paths, do_creds=not args.no_creds,
         do_exploit=args.exploit,
+        crawl_depth=args.crawl_depth, crawl_max_pages=args.crawl_max_pages,
+        auth=auth, cookie=args.cookie,
+        do_ssti=not args.no_ssti, do_ssrf=not args.no_ssrf,
+        do_redirect=not args.no_redirect, do_upload=not args.no_upload,
     )
     report = scanner.run()
     render_console(report)

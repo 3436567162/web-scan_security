@@ -24,6 +24,12 @@
 | 弱口令 / 默认凭据 | 常见默认账密字典登录尝试 |
 | 用户名枚举 | 合法名 vs 不存在名 的错误提示差异分析 |
 | 敏感路径 | robots.txt / .git / .env / 备份文件 / phpMyAdmin / Swagger 等 34 项 |
+| **站点爬虫** | BFS 爬取同源链接/表单/参数，多页面扫描（`--crawl-depth`，默认仅单页） |
+| **认证后扫描** | 自动登录或粘贴 Cookie，携带会话扫描登录后页面（`--login-*` / `--cookie`） |
+| **SSTI** | 注入模板表达式 `{{49*49}}` 等，检测求值结果回显 |
+| **SSRF** | 注入本机回调 URL，检测服务端外联请求（本机回调，不涉及第三方） |
+| **开放重定向** | 注入外部跳转目标，检测 Location 头是否跳转外部域 |
+| **文件上传** | 检测上传表单；授权模式下探测良性上传是否被接受 |
 | **漏洞利用取证（可选）** | 发现可确认漏洞后，主动利用并提取后台信息（见下） |
 
 ## 漏洞利用取证（可选，侵入性）
@@ -66,12 +72,28 @@ python vuln_scanner.py https://example.com/login --timeout 15 --ua "Mozilla/5.0 
 
 # 指定报告目录
 python vuln_scanner.py https://example.com/login --out ./my_reports
+
+# 站点爬虫：深度 2，最多 30 个页面
+python vuln_scanner.py https://example.com/ --crawl-depth 2 --crawl-max-pages 30
+
+# 认证后扫描：自动登录拿会话，再爬取后台
+python vuln_scanner.py https://example.com/ --crawl-depth 2 \
+  --login-url https://example.com/login --login-user admin --login-password 'P@ss' \
+  --login-user-field username --login-pwd-field password
+
+# 认证后扫描：直接粘贴已有 Cookie
+python vuln_scanner.py https://example.com/ --crawl-depth 2 --cookie "session=abc123; csrftoken=xyz"
 ```
 
 参数：
-- `url`：目标登录页 URL
+- `url`：目标 URL
 - `--timeout`：请求超时秒数（默认 10）
-- `--no-sql` / `--no-xss` / `--no-paths`：跳过对应检测
+- `--no-sql` / `--no-xss` / `--no-paths` / `--no-creds`：跳过对应检测
+- `--no-ssti` / `--no-ssrf` / `--no-redirect` / `--no-upload`：跳过新增注入检测
+- `--exploit`：启用漏洞利用取证（主动利用，需授权）
+- `--crawl-depth` / `--crawl-max-pages`：站点爬虫深度与最大页数（默认 0=仅单页 / 15）
+- `--login-url` `--login-user` `--login-password` `--login-user-field` `--login-pwd-field`：自动登录认证
+- `--cookie`：直接粘贴 Cookie 字符串认证
 - `--ua`：自定义 User-Agent
 - `--out`：报告输出目录（默认 `reports`）
 

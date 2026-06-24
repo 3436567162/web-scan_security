@@ -75,29 +75,67 @@ class ScannerApp:
         self.var_creds = tk.BooleanVar(value=True)
         self.var_exploit = tk.BooleanVar(value=False)
 
-        for txt, var in [("SQL/NoSQL/LDAP/XPath 注入", self.var_sql),
+        for txt, var in [("SQL/注入", self.var_sql),
                          ("XSS 反射", self.var_xss),
                          ("敏感路径", self.var_paths),
-                         ("弱口令 / 用户枚举", self.var_creds)]:
-            ttk.Checkbutton(opts, text=txt, variable=var).pack(side="left", padx=6)
+                         ("弱口令", self.var_creds)]:
+            ttk.Checkbutton(opts, text=txt, variable=var).pack(side="left", padx=4)
+
+        # 新增注入项
+        self.var_ssti = tk.BooleanVar(value=True)
+        self.var_ssrf = tk.BooleanVar(value=True)
+        self.var_redirect = tk.BooleanVar(value=True)
+        self.var_upload = tk.BooleanVar(value=True)
+        inj_row = tk.Frame(opts)
+        inj_row.pack(side="left", padx=4)
+        for txt, var in [("SSTI", self.var_ssti), ("SSRF", self.var_ssrf),
+                         ("开放重定向", self.var_redirect), ("文件上传", self.var_upload)]:
+            ttk.Checkbutton(inj_row, text=txt, variable=var).pack(side="left", padx=3)
 
         exploit_frame = tk.Frame(opts)
         exploit_frame.pack(side="left", padx=6)
         self.exploit_cb = tk.Checkbutton(
-            exploit_frame, text="⚠ 发现漏洞时尝试利用 / 进入后台取证",
+            exploit_frame, text="⚠ 利用/后台取证",
             variable=self.var_exploit, fg="#c62828",
             activeforeground="#c62828", selectcolor="#fff8e1",
             command=self._on_exploit_toggle)
         self.exploit_cb.pack(side="left")
 
-        ttk.Label(opts, text="超时(秒)：").pack(side="left", padx=(16, 2))
+        ttk.Label(opts, text="超时:").pack(side="left", padx=(10, 2))
         self.timeout_var = tk.IntVar(value=10)
-        ttk.Spinbox(opts, from_=3, to=60, width=5,
+        ttk.Spinbox(opts, from_=3, to=60, width=4,
                     textvariable=self.timeout_var).pack(side="left")
 
-        ttk.Label(opts, text="User-Agent：").pack(side="left", padx=(16, 2))
-        self.ua_var = tk.StringVar(value=vuln_scanner.DEFAULT_UA)
-        ttk.Entry(opts, textvariable=self.ua_var, width=42).pack(side="left")
+        ttk.Label(opts, text="爬虫深度:").pack(side="left", padx=(8, 2))
+        self.crawl_depth_var = tk.IntVar(value=0)
+        ttk.Spinbox(opts, from_=0, to=5, width=3,
+                    textvariable=self.crawl_depth_var).pack(side="left")
+        ttk.Label(opts, text="最大页数:").pack(side="left", padx=(8, 2))
+        self.crawl_max_var = tk.IntVar(value=15)
+        ttk.Spinbox(opts, from_=1, to=200, width=4,
+                    textvariable=self.crawl_max_var).pack(side="left")
+
+        # 认证配置区
+        auth = ttk.LabelFrame(self.root, text="认证后扫描（可选）", padding=6)
+        auth.pack(fill="x", padx=10, pady=(4, 2))
+        ttk.Label(auth, text="登录URL:").pack(side="left")
+        self.login_url_var = tk.StringVar()
+        ttk.Entry(auth, textvariable=self.login_url_var, width=22).pack(side="left", padx=3)
+        ttk.Label(auth, text="账号:").pack(side="left", padx=(4, 0))
+        self.login_user_var = tk.StringVar()
+        ttk.Entry(auth, textvariable=self.login_user_var, width=12).pack(side="left", padx=3)
+        ttk.Label(auth, text="密码:").pack(side="left", padx=(4, 0))
+        self.login_pwd_var = tk.StringVar()
+        ttk.Entry(auth, textvariable=self.login_pwd_var, width=12, show="*").pack(side="left", padx=3)
+        ttk.Label(auth, text="用户字段:").pack(side="left", padx=(6, 0))
+        self.login_uf_var = tk.StringVar(value="username")
+        ttk.Entry(auth, textvariable=self.login_uf_var, width=9).pack(side="left", padx=3)
+        ttk.Label(auth, text="密码字段:").pack(side="left", padx=(4, 0))
+        self.login_pf_var = tk.StringVar(value="password")
+        ttk.Entry(auth, textvariable=self.login_pf_var, width=9).pack(side="left", padx=3)
+        ttk.Label(auth, text="或 Cookie:").pack(side="left", padx=(8, 0))
+        self.cookie_var = tk.StringVar()
+        ttk.Entry(auth, textvariable=self.cookie_var, width=24).pack(side="left", padx=3)
 
         # 中部：日志 + 结果（左右分栏）
         body = ttk.PanedWindow(self.root, orient="horizontal")
@@ -219,11 +257,26 @@ class ScannerApp:
         self._refresh_button_state(running=True)
         self.status_var.set("扫描中…")
 
+        auth = None
+        if self.login_url_var.get().strip() and self.login_user_var.get().strip():
+            auth = {
+                "login_url": self.login_url_var.get().strip(),
+                "user_field": self.login_uf_var.get().strip() or "username",
+                "pwd_field": self.login_pf_var.get().strip() or "password",
+                "user": self.login_user_var.get().strip(),
+                "password": self.login_pwd_var.get(),
+            }
+        cookie = self.cookie_var.get().strip() or None
         scanner = vuln_scanner.VulnScanner(
             url, timeout=self.timeout_var.get(), ua=self.ua_var.get(),
             do_sql=self.var_sql.get(), do_xss=self.var_xss.get(),
             do_paths=self.var_paths.get(), do_creds=self.var_creds.get(),
             do_exploit=self.var_exploit.get(),
+            crawl_depth=self.crawl_depth_var.get(),
+            crawl_max_pages=self.crawl_max_var.get(),
+            auth=auth, cookie=cookie,
+            do_ssti=self.var_ssti.get(), do_ssrf=self.var_ssrf.get(),
+            do_redirect=self.var_redirect.get(), do_upload=self.var_upload.get(),
             on_log=self.log, cancel=lambda: self.cancel_flag["stop"],
         )
 
