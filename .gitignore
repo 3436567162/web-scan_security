@@ -1,39 +1,22 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
 *.egg-info/
-dist/
-build/
-eggs/
-*.egg
-
-# Virtual environments
-venv/
 .venv/
-env/
+venv/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
+# 构建产物（PyInstaller）
+build/
+dist/
+*.spec
+*.exe
 
-# OS
+# 扫描报告（运行时生成）
+reports/
+
+# 系统/编辑器
 .DS_Store
 Thumbs.db
-
-# Claude Code
-.claude/
-
-# Playwright MCP
-.playwright-mcp/
-
-# Flask
-*.db
-instance/
-
-# Environment variables
-.env
-.env.local
+.idea/
+.vscode/
+*.log

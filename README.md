@@ -1,155 +1,106 @@
-# Web Vulnerability Scanner
+# VulnScanner — 登录网址漏洞扫描工具
 
-一个基于 Python + Flask 的轻量级 Web 漏洞扫描器，提供浏览器界面和 JSON API，可对目标站点执行基础信息收集与常见 Web 安全检查。
+一个轻量级、纯 Python 的 Web 登录页漏洞扫描工具，扫描后自动生成 JSON + HTML 报告。
+**仅用于授权的安全测试、CTF、教学与自检场景。**
 
-## 功能概览
+## 功能
 
-- 信息收集：服务指纹、技术栈识别、CMS 识别、管理路径探测
-- 安全响应头：缺失或弱配置的安全头检查
-- SQL 注入：基于参数和表单的基础探测
-- XSS：基于参数和表单的反射型 XSS 探测
-- 敏感路径：常见敏感文件、目录列表与路径穿越探测
-- 开放重定向：参数型和部分路径型重定向检查
-- CORS：跨域资源共享配置问题检查
-- 模块选择：前端和 API 都支持按模块选择扫描范围
+| 检测项 | 说明 |
+|--------|------|
+| 安全响应头 | HSTS / X-Frame-Options / CSP / X-Content-Type-Options / Referrer-Policy / Permissions-Policy / X-XSS-Protection / COOP / CORP |
+| Cookie 安全 | Secure / HttpOnly / SameSite 属性 |
+| SSL/TLS | HTTPS 启用、TLS 版本、证书有效期 |
+| 表单枚举 | 自动识别登录表单与字段 |
+| SQL 注入（错误回显） | 多数据库错误特征 + 多闭合方式 payload（16+ 载荷） |
+| SQL 注入（时间盲注） | SLEEP / IF / WAITFOR / pg_sleep 延迟探测 |
+| SQL 注入（布尔盲注） | 恒真 vs 恒假响应差异比对 |
+| NoSQL / LDAP / XPath 注入 | 错误回显特征识别 + 注入载荷 |
+| XSS 探测 | URL 参数反射 + GET 表单字段反射（14 种探针，含编码/标签绕过） |
+| 目录遍历 | `../` / 编码绕过 / Windows+Unix / 系统文件特征识别 |
+| 命令注入 | 时间盲注探测（sleep / ping / 反引号 / $()） |
+| CRLF / 响应头注入 | 头部注入载荷 + 回显校验 |
+| 弱口令 / 默认凭据 | 常见默认账密字典登录尝试 |
+| 用户名枚举 | 合法名 vs 不存在名 的错误提示差异分析 |
+| 敏感路径 | robots.txt / .git / .env / 备份文件 / phpMyAdmin / Swagger 等 34 项 |
+| **漏洞利用取证（可选）** | 发现可确认漏洞后，主动利用并提取后台信息（见下） |
 
-## 项目结构
+## 漏洞利用取证（可选，侵入性）
 
-```text
-app.py
-requirements.txt
-scanner/
-  crawler.py
-  url_safety.py
-  info_gather.py
-  security_headers.py
-  sqli_scanner.py
-  xss_scanner.py
-  dir_traversal.py
-  open_redirect.py
-  cors_check.py
-templates/
-  index.html
-static/
-  style.css
-tests/
-```
+启用方式：GUI 勾选「⚠ 发现漏洞时尝试利用 / 进入后台取证」，或 CLI 加 `--exploit`。
+**仅在已获书面授权时使用**——该阶段会主动提交利用载荷 / 用已知凭据登录后台。
+仅做只读探测，不执行任何写操作。
 
-## 环境要求
+发现可确认漏洞时，会尝试：
 
-- Python 3.8+
+- **SQL 注入 → UNION 提取**：枚举查询列数、定位可回显列，提取 `version()` /
+  `database()` / `current_user()` / 主机名 / 当前库的表名（只读）。
+- **默认/弱口令 → 登录后台**：用确认有效的凭据登录，跟随跳转进入后台，
+  抓取会话 Cookie、后台链接、邮箱、疑似账号名、配置项等可见信息。
 
-## 安装与运行
+提取到的信息会作为独立的「后台取证 / 漏洞利用证据」章节，呈现在
+**JSON / HTML / PDF** 三份报告中。
+
+## 安装
 
 ```bash
 pip install -r requirements.txt
-python app.py
 ```
 
-默认监听地址为 `127.0.0.1:5000`。启动后在浏览器访问：
-
-```text
-http://127.0.0.1:5000
-```
-
-## 可选环境变量
-
-- `FLASK_HOST`：服务监听地址
-- `FLASK_PORT`：服务监听端口
-- `FLASK_DEBUG`：是否开启 Flask debug 模式，支持 `1/true/yes/on`
-- `TRUSTED_PROXIES`：受信代理 IP 列表，逗号分隔；只有来自这些代理的请求才会信任 `X-Forwarded-For`
-- `SCANNER_VERIFY_TLS`：是否校验证书，默认开启；显式设为 `0/false/no/off` 时关闭
-
-示例：
+## 使用
 
 ```bash
-FLASK_HOST=0.0.0.0
-FLASK_PORT=8080
-FLASK_DEBUG=true
-TRUSTED_PROXIES=127.0.0.1,10.0.0.10
-SCANNER_VERIFY_TLS=true
+# 基本用法
+python vuln_scanner.py https://example.com/login
+
+# 跳过部分检测
+python vuln_scanner.py https://example.com/login --no-sql --no-paths
+
+# 自定义超时与 User-Agent
+python vuln_scanner.py https://example.com/login --timeout 15 --ua "Mozilla/5.0 ..."
+
+# 指定报告目录
+python vuln_scanner.py https://example.com/login --out ./my_reports
 ```
 
-## Web 界面
+参数：
+- `url`：目标登录页 URL
+- `--timeout`：请求超时秒数（默认 10）
+- `--no-sql` / `--no-xss` / `--no-paths`：跳过对应检测
+- `--ua`：自定义 User-Agent
+- `--out`：报告输出目录（默认 `reports`）
 
-- 输入目标 URL 后可直接发起扫描
-- 支持勾选扫描模块，缩小扫描范围
-- 展示高、中、低风险与通过项汇总
-- 展示扫描元数据，包括耗时、请求预算和实际执行模块
+## 输出
 
-## API
+- 终端：彩色摘要，按严重级别排序
+- `reports/<host>_<timestamp>.json`：结构化报告
+- `reports/<host>_<timestamp>.html`：可视化 HTML 报告（可浏览器打开）
+- `reports/<host>_<timestamp>.pdf`：PDF 报告（适合存档与分享，支持中文）
 
-### `POST /api/scan`
+严重级别：`critical`（严重） > `high`（高危） > `medium`（中危） > `low`（低危） > `info`（信息）
 
-请求体：
+## ⚠️ 法律与伦理声明
 
-```json
-{
-  "url": "https://example.com",
-  "modules": ["info_gather", "security_headers", "cors"]
-}
-```
+本工具仅供授权场景使用。对未取得书面授权的目标进行扫描属于违法行为，
+使用者须自行承担全部法律责任。扫描结果需结合人工复核确认。
 
-说明：
+## GUI / EXE 版本
 
-- `url` 必填
-- `modules` 选填；省略时执行全部模块
-- 若 `modules` 中包含未知模块，接口会返回 `400`
-
-响应示例：
-
-```json
-{
-  "url": "https://example.com",
-  "results": {
-    "info_gather": [
-      {
-        "type": "info",
-        "title": "Server fingerprint",
-        "detail": "Server: nginx | X-Powered-By: Unknown | Status code: 200"
-      }
-    ]
-  },
-  "summary": {
-    "high": 0,
-    "medium": 1,
-    "low": 2
-  },
-  "scan_metadata": {
-    "started_at": "2026-05-08T12:00:00Z",
-    "finished_at": "2026-05-08T12:00:01Z",
-    "duration_ms": 812,
-    "request_budget_limit": 60,
-    "request_budget_exhausted": false,
-    "modules_run": ["info_gather", "security_headers"],
-    "modules_skipped": [],
-    "selected_modules": ["info_gather", "security_headers", "cors"]
-  }
-}
-```
-
-## 安全控制
-
-- 仅允许扫描公网 `http/https` 目标
-- 默认校验 TLS 证书
-- 会校验重定向目标是否合法
-- 会校验实际连接到的对端 IP，拒绝异常或受限地址
-- 单次扫描带有出站请求预算限制
-- 同一客户端存在短时间冷却限制
-
-## 测试
-
-运行全部测试：
+### 图形界面运行
 
 ```bash
-python -m pytest -q
+python gui.py
 ```
 
-## 使用边界
+界面功能：URL 输入、检测项勾选（注入 / XSS / 敏感路径 / 弱口令）、超时与 UA 设置、
+开始/停止扫描、实时日志、结果表格（按级别着色）、严重级别统计、一键打开 JSON/HTML/PDF 报告。
 
-- 仅应在你拥有授权的目标上使用
-- 本项目用于教学、研究和本地实验环境验证，不应作为高强度生产扫描器直接投入外网批量使用
+### 打包为单文件 EXE
 
-## License
+```bash
+export PYINSTALLER_DISABLE_ISOLATION=1   # Anaconda 环境需禁用隔离子进程
+pyinstaller --noconfirm --onefile --windowed --name "VulnScanner" \
+    --add-data "C:/Windows/Fonts/simhei.ttf;." gui.py
+```
 
-[MIT](LICENSE)
+产物：`dist/VulnScanner.exe`（约 30 MB，无需安装 Python 即可运行）。
+在 Windows 资源管理器双击即可启动图形界面。
